@@ -47,6 +47,6 @@ where
             .as_ref()
             .ok_or_else(|| eyre::eyre!("aviation client not available"))?;
         let input: String = ctx.args.join(" ");
-        crate::aviation::up_command(ctx.privmsg, ctx.client, client, &input, &self.cooldown).await
+        crate::aviation::up_command(ctx.privmsg, ctx.sender, client, &input, &self.cooldown).await
     }
 }

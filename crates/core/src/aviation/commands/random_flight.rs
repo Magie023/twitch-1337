@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use eyre::{Result, WrapErr};
-use tracing::{error, instrument, warn};
-use twitch_irc::{
-    TwitchIRCClient, login::LoginCredentials, message::PrivmsgMessage, transport::Transport,
-};
+use tracing::{instrument, warn};
+use twitch_irc::{login::LoginCredentials, message::PrivmsgMessage, transport::Transport};
 
 use crate::commands::{Command, CommandContext};
+use crate::twitch::ChatSender;
 use crate::util::parse_flight_duration;
 
 pub struct RandomFlightCommand;
@@ -25,7 +24,7 @@ where
     async fn execute(&self, ctx: CommandContext<'_, T, L>) -> Result<()> {
         flight_command(
             ctx.privmsg,
-            ctx.client,
+            ctx.sender,
             ctx.args.first().copied(),
             ctx.args.get(1).copied(),
         )
@@ -33,10 +32,10 @@ where
     }
 }
 
-#[instrument(skip(privmsg, client), fields(user = %privmsg.sender.login))]
+#[instrument(skip(privmsg, sender), fields(user = %privmsg.sender.login))]
 pub(crate) async fn flight_command<T, L>(
     privmsg: &PrivmsgMessage,
-    client: &Arc<TwitchIRCClient<T, L>>,
+    sender: &Arc<ChatSender<T, L>>,
     aircraft_code: Option<&str>,
     duration_str: Option<&str>,
 ) -> Result<()>
@@ -47,32 +46,19 @@ where
     const USAGE_MSG: &str = "Gib mir nen Flugzeug und ne Zeit, z.B. !fl A20N 1h FDM";
 
     let (Some(aircraft_code), Some(duration_str)) = (aircraft_code, duration_str) else {
-        if let Err(e) = client
-            .say_in_reply_to(privmsg, String::from(USAGE_MSG))
-            .await
-        {
-            error!(error = ?e, "Failed to send flight usage message");
-        }
+        sender.reply(privmsg, USAGE_MSG).await;
         return Ok(());
     };
 
     let Some(aircraft) = random_flight::aircraft_by_icao_type(aircraft_code) else {
-        if let Err(e) = client
-            .say_in_reply_to(privmsg, String::from("Das Flugzeug kenn ich nich FDM"))
-            .await
-        {
-            error!(error = ?e, "Failed to send 'unknown aircraft' error message");
-        }
+        sender
+            .reply(privmsg, "Das Flugzeug kenn ich nich FDM")
+            .await;
         return Ok(());
     };
 
     let Some(duration) = parse_flight_duration(duration_str) else {
-        if let Err(e) = client
-            .say_in_reply_to(privmsg, String::from(USAGE_MSG))
-            .await
-        {
-            error!(error = ?e, "Failed to send flight duration usage message");
-        }
+        sender.reply(privmsg, USAGE_MSG).await;
         return Ok(());
     };
 
@@ -87,15 +73,12 @@ where
         Ok(fp) => fp,
         Err(e) => {
             warn!(error = ?e, "Flight plan generation failed");
-            if let Err(e) = client
-                .say_in_reply_to(
+            sender
+                .reply(
                     privmsg,
-                    String::from("Hab keine Route gefunden, versuch mal ne andere Zeit FDM"),
+                    "Hab keine Route gefunden, versuch mal ne andere Zeit FDM",
                 )
-                .await
-            {
-                error!(error = ?e, "Failed to send 'no route found' error message");
-            }
+                .await;
             return Ok(());
         }
     };
@@ -112,7 +95,7 @@ where
         fp.simbrief_url(),
     );
 
-    client.say_in_reply_to(privmsg, response).await?;
+    sender.reply(privmsg, response).await;
 
     Ok(())
 }

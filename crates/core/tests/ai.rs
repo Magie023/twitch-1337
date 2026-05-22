@@ -380,3 +380,19 @@ async fn ai_command_read_url_round_trip() {
     // not affected. Serial execution means this is belt-and-suspenders.
     twitch_1337::ai::content::client::ssrf_bypass_for_tests(false);
 }
+
+/// `ChatSender` strips control characters so a `\r\n` in the model's reply
+/// can't split the outgoing IRC PRIVMSG. The fake transport receives the
+/// sanitized form on a single line.
+#[tokio::test]
+async fn ai_response_with_crlf_is_sanitized_to_single_line() {
+    let bot = TestBotBuilder::new().with_ai().spawn().await;
+    bot.llm.push_tool_message("hello\r\nworld");
+
+    let mut bot = bot;
+    bot.send("alice", "!ai ping").await;
+    let body = bot.expect_reply(Duration::from_secs(2)).await;
+    assert_eq!(body, "hello world");
+
+    bot.shutdown().await;
+}

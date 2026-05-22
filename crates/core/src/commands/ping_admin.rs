@@ -44,9 +44,7 @@ where
         match subcommand {
             "create" | "delete" | "edit" | "add" | "remove" => {
                 if !is_admin(ctx.privmsg, &self.hidden_admin_ids) {
-                    ctx.client
-                        .say_in_reply_to(ctx.privmsg, ADMIN_DENIED_MSG.to_string())
-                        .await?;
+                    ctx.sender.reply(ctx.privmsg, ADMIN_DENIED_MSG).await;
                     return Ok(());
                 }
                 match subcommand {
@@ -62,13 +60,12 @@ where
             "leave" => self.handle_self_op(&ctx, "leave").await,
             "list" => self.handle_list(&ctx).await,
             _ => {
-                ctx.client
-                    .say_in_reply_to(
+                ctx.sender
+                    .reply(
                         ctx.privmsg,
-                        "Nutze: join, leave, list (oder create, delete, edit, add, remove als Mod)"
-                            .to_string(),
+                        "Nutze: join, leave, list (oder create, delete, edit, add, remove als Mod)",
                     )
-                    .await?;
+                    .await;
                 Ok(())
             }
         }
@@ -83,12 +80,9 @@ impl PingAdminCommand {
         L: LoginCredentials,
     {
         if ctx.args.len() < 3 {
-            ctx.client
-                .say_in_reply_to(
-                    ctx.privmsg,
-                    "Nutze: !p create <name> <template>".to_string(),
-                )
-                .await?;
+            ctx.sender
+                .reply(ctx.privmsg, "Nutze: !p create <name> <template>")
+                .await;
             return Ok(());
         }
 
@@ -103,14 +97,12 @@ impl PingAdminCommand {
             None,
         ) {
             Ok(()) => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, format!("Ping \"{name}\" erstellt Okayge"))
-                    .await?;
+                ctx.sender
+                    .reply(ctx.privmsg, format!("Ping \"{name}\" erstellt Okayge"))
+                    .await;
             }
             Err(e) => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, format!("{e} FDM"))
-                    .await?;
+                ctx.sender.reply(ctx.privmsg, format!("{e} FDM")).await;
             }
         }
         Ok(())
@@ -125,9 +117,9 @@ impl PingAdminCommand {
         let name = match ctx.args.get(1) {
             Some(n) => normalize_ping_name(n),
             None => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, "Nutze: !p delete <name>".to_string())
-                    .await?;
+                ctx.sender
+                    .reply(ctx.privmsg, "Nutze: !p delete <name>")
+                    .await;
                 return Ok(());
             }
         };
@@ -135,14 +127,12 @@ impl PingAdminCommand {
         let mut manager = self.ping_manager.write().await;
         match manager.delete_ping(&name) {
             Ok(()) => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, format!("Ping \"{name}\" gelöscht Okayge"))
-                    .await?;
+                ctx.sender
+                    .reply(ctx.privmsg, format!("Ping \"{name}\" gelöscht Okayge"))
+                    .await;
             }
             Err(e) => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, format!("{e} FDM"))
-                    .await?;
+                ctx.sender.reply(ctx.privmsg, format!("{e} FDM")).await;
             }
         }
         Ok(())
@@ -155,9 +145,9 @@ impl PingAdminCommand {
         L: LoginCredentials,
     {
         if ctx.args.len() < 3 {
-            ctx.client
-                .say_in_reply_to(ctx.privmsg, "Nutze: !p edit <name> <template>".to_string())
-                .await?;
+            ctx.sender
+                .reply(ctx.privmsg, "Nutze: !p edit <name> <template>")
+                .await;
             return Ok(());
         }
 
@@ -167,14 +157,12 @@ impl PingAdminCommand {
         let mut manager = self.ping_manager.write().await;
         match manager.edit_template(&name, template) {
             Ok(()) => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, format!("Ping \"{name}\" updated SeemsGood"))
-                    .await?;
+                ctx.sender
+                    .reply(ctx.privmsg, format!("Ping \"{name}\" updated SeemsGood"))
+                    .await;
             }
             Err(e) => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, format!("{e} FDM"))
-                    .await?;
+                ctx.sender.reply(ctx.privmsg, format!("{e} FDM")).await;
             }
         }
         Ok(())
@@ -187,9 +175,9 @@ impl PingAdminCommand {
         L: LoginCredentials,
     {
         if ctx.args.len() < 3 {
-            ctx.client
-                .say_in_reply_to(ctx.privmsg, format!("Nutze: !p {op} <name> <user>"))
-                .await?;
+            ctx.sender
+                .reply(ctx.privmsg, format!("Nutze: !p {op} <name> <user>"))
+                .await;
             return Ok(());
         }
 
@@ -210,12 +198,10 @@ impl PingAdminCommand {
                     "remove" => format!("{user} aus \"{name}\" entfernt Okayge"),
                     _ => unreachable!(),
                 };
-                ctx.client.say_in_reply_to(ctx.privmsg, msg).await?;
+                ctx.sender.reply(ctx.privmsg, msg).await;
             }
             Err(e) => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, format!("{e} FDM"))
-                    .await?;
+                ctx.sender.reply(ctx.privmsg, format!("{e} FDM")).await;
             }
         }
         Ok(())
@@ -230,9 +216,9 @@ impl PingAdminCommand {
         let name = match ctx.args.get(1) {
             Some(n) => normalize_ping_name(n),
             None => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, format!("Nutze: !p {op} <name>"))
-                    .await?;
+                ctx.sender
+                    .reply(ctx.privmsg, format!("Nutze: !p {op} <name>"))
+                    .await;
                 return Ok(());
             }
         };
@@ -246,9 +232,9 @@ impl PingAdminCommand {
 
         match result {
             Ok(()) => {
-                ctx.client
-                    .say_in_reply_to(ctx.privmsg, "Hab ich gemacht Okayge".to_string())
-                    .await?;
+                ctx.sender
+                    .reply(ctx.privmsg, "Hab ich gemacht Okayge")
+                    .await;
             }
             Err(e) => {
                 let err_str = e.to_string();
@@ -261,7 +247,7 @@ impl PingAdminCommand {
                         _ => unreachable!(),
                     }
                 };
-                ctx.client.say_in_reply_to(ctx.privmsg, msg).await?;
+                ctx.sender.reply(ctx.privmsg, msg).await;
             }
         }
         Ok(())
@@ -282,7 +268,7 @@ impl PingAdminCommand {
             pings.join(" ")
         };
 
-        ctx.client.say_in_reply_to(ctx.privmsg, response).await?;
+        ctx.sender.reply(ctx.privmsg, response).await;
         Ok(())
     }
 }

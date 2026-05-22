@@ -19,13 +19,12 @@ use tokio::{
 };
 use tracing::{debug, error, info, instrument, warn};
 use twitch_irc::{
-    TwitchIRCClient,
     login::LoginCredentials,
     message::{PrivmsgMessage, ServerMessage},
     transport::Transport,
 };
 
-use crate::{resolve_berlin_time, util::clock::Clock};
+use crate::{resolve_berlin_time, twitch::ChatSender, util::clock::Clock};
 
 pub const TARGET_HOUR: u32 = 13;
 pub const TARGET_MINUTE: u32 = 37;
@@ -374,7 +373,7 @@ pub(crate) async fn monitor_1337_messages(
 /// Runs continuously, resetting state daily.
 pub async fn run_1337_handler<T, L>(
     broadcast_tx: broadcast::Sender<ServerMessage>,
-    client: Arc<TwitchIRCClient<T, L>>,
+    sender: Arc<ChatSender<T, L>>,
     channel: String,
     latency: Arc<AtomicU32>,
     leaderboard: Arc<tokio::sync::RwLock<HashMap<String, PersonalBest>>>,
@@ -418,9 +417,7 @@ pub async fn run_1337_handler<T, L>(
         .await;
 
         info!("Posting reminder to channel");
-        if let Err(e) = client.say(channel.clone(), "PausersHype".to_string()).await {
-            error!(error = ?e, "Failed to send reminder message");
-        }
+        sender.say(channel.clone(), "PausersHype").await;
 
         // Wait until 13:38 to post stats
         sleep_until_hms(
@@ -515,11 +512,7 @@ pub async fn run_1337_handler<T, L>(
 
         // Post stats message
         info!(count = count, "Posting stats to channel");
-        if let Err(e) = client.say(channel.clone(), message).await {
-            error!(error = ?e, count = count, "Failed to send stats message");
-        } else {
-            info!("Stats posted successfully");
-        }
+        sender.say(channel.clone(), message).await;
 
         info!("Daily 1337 session completed, waiting for next day");
     }

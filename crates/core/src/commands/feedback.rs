@@ -48,31 +48,23 @@ where
 
         // Check for empty message
         if message.trim().is_empty() {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(ctx.privmsg, "Benutzung: !fb <nachricht>".to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send usage message");
-            }
+            ctx.sender
+                .reply(ctx.privmsg, "Benutzung: !fb <nachricht>")
+                .await;
             return Ok(());
         }
 
         // Check cooldown
         if let Some(remaining) = self.cooldown.check(user).await {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
+            ctx.sender
+                .reply(
                     ctx.privmsg,
                     format!(
                         "Bitte warte noch {} Waiting",
                         format_cooldown_remaining(remaining)
                     ),
                 )
-                .await
-            {
-                error!(error = ?e, "Failed to send cooldown message");
-            }
+                .await;
             return Ok(());
         }
 
@@ -94,38 +86,26 @@ where
             Ok(mut file) => {
                 if let Err(e) = file.write_all(line.as_bytes()).await {
                     error!(error = ?e, "Failed to write feedback to file");
-                    if let Err(e) = ctx
-                        .client
-                        .say_in_reply_to(ctx.privmsg, "Da ist was schiefgelaufen FDM".to_string())
-                        .await
-                    {
-                        error!(error = ?e, "Failed to send error message");
-                    }
+                    ctx.sender
+                        .reply(ctx.privmsg, "Da ist was schiefgelaufen FDM")
+                        .await;
                     return Ok(());
                 }
             }
             Err(e) => {
                 error!(error = ?e, "Failed to open feedback file");
-                if let Err(e) = ctx
-                    .client
-                    .say_in_reply_to(ctx.privmsg, "Da ist was schiefgelaufen FDM".to_string())
-                    .await
-                {
-                    error!(error = ?e, "Failed to send error message");
-                }
+                ctx.sender
+                    .reply(ctx.privmsg, "Da ist was schiefgelaufen FDM")
+                    .await;
                 return Ok(());
             }
         }
 
         info!(user = %user, "Feedback saved");
 
-        if let Err(e) = ctx
-            .client
-            .say_in_reply_to(ctx.privmsg, "Feedback gespeichert Okayge".to_string())
-            .await
-        {
-            error!(error = ?e, "Failed to send confirmation message");
-        }
+        ctx.sender
+            .reply(ctx.privmsg, "Feedback gespeichert Okayge")
+            .await;
 
         Ok(())
     }

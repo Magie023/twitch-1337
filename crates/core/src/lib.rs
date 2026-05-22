@@ -64,9 +64,8 @@ pub use twitch::{
     token_storage::FileBasedTokenStorage,
 };
 pub use util::{
-    APP_USER_AGENT, MAX_RESPONSE_LENGTH, ensure_data_dir, get_config_path, get_data_dir,
-    install_crypto_provider, parse_flight_duration, resolve_berlin_time,
-    telemetry::install_tracing, truncate_response,
+    APP_USER_AGENT, ensure_data_dir, get_config_path, get_data_dir, install_crypto_provider,
+    parse_flight_duration, resolve_berlin_time, telemetry::install_tracing, truncate_response,
 };
 
 /// Test-overridable services injected into [`run_bot`].

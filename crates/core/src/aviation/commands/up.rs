@@ -5,12 +5,10 @@ use std::time::Duration;
 
 use eyre::{Result, WrapErr as _};
 use tracing::{debug, error, warn};
-use twitch_irc::{
-    TwitchIRCClient, login::LoginCredentials, message::PrivmsgMessage, transport::Transport,
-};
+use twitch_irc::{login::LoginCredentials, message::PrivmsgMessage, transport::Transport};
 
 use crate::cooldown::format_cooldown_remaining;
-use crate::util::{MAX_RESPONSE_LENGTH, truncate_response};
+use crate::twitch::ChatSender;
 
 use super::super::client::AviationClient;
 use super::super::formatting::format_altitude;
@@ -45,7 +43,7 @@ fn cone_distance_nm(ac: &NearbyAircraft, center_lat: f64, center_lon: f64) -> Op
 
 pub async fn up_command<T, L>(
     privmsg: &PrivmsgMessage,
-    client: &Arc<TwitchIRCClient<T, L>>,
+    sender: &Arc<ChatSender<T, L>>,
     aviation_client: &AviationClient,
     input: &str,
     cooldown: &crate::cooldown::PerUserCooldown,
@@ -59,33 +57,24 @@ where
 
     // Empty input
     if input.is_empty() {
-        if let Err(e) = client
-            .say_in_reply_to(
-                privmsg,
-                "Benutzung: !up <PLZ/ICAO/IATA/Ort> FDM".to_string(),
-            )
-            .await
-        {
-            error!(error = ?e, "Failed to send usage message");
-        }
+        sender
+            .reply(privmsg, "Benutzung: !up <PLZ/ICAO/IATA/Ort> FDM")
+            .await;
         return Ok(());
     }
 
     // Check cooldown
     if let Some(remaining) = cooldown.check(user).await {
         debug!(user = %user, remaining_secs = remaining.as_secs(), "!up on cooldown");
-        if let Err(e) = client
-            .say_in_reply_to(
+        sender
+            .reply(
                 privmsg,
                 format!(
                     "Bitte warte noch {} Waiting",
                     format_cooldown_remaining(remaining)
                 ),
             )
-            .await
-        {
-            error!(error = ?e, "Failed to send cooldown message");
-        }
+            .await;
         return Ok(());
     }
 
@@ -95,31 +84,16 @@ where
     let location = match resolve_location(input, aviation_client).await {
         Ok(ResolveResult::Found(loc)) => loc,
         Ok(ResolveResult::PlzNotFound) => {
-            if let Err(e) = client
-                .say_in_reply_to(privmsg, "Kenne ich nicht die PLZ FDM".to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send unknown PLZ message");
-            }
+            sender.reply(privmsg, "Kenne ich nicht die PLZ FDM").await;
             return Ok(());
         }
         Ok(ResolveResult::NotFound) => {
-            if let Err(e) = client
-                .say_in_reply_to(privmsg, "Kenne ich nicht FDM".to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send not-found message");
-            }
+            sender.reply(privmsg, "Kenne ich nicht FDM").await;
             return Ok(());
         }
         Err(e) => {
             error!(error = ?e, input = %input, "Location resolution failed");
-            if let Err(e) = client
-                .say_in_reply_to(privmsg, "Da ist was schiefgelaufen FDM".to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send error message");
-            }
+            sender.reply(privmsg, "Da ist was schiefgelaufen FDM").await;
             return Ok(());
         }
     };
@@ -261,8 +235,7 @@ where
                 })
                 .collect();
             let joined = parts.join(" | ");
-            let msg = format!("✈ {total} Flieger über {display_name}: {joined}");
-            truncate_response(&msg, MAX_RESPONSE_LENGTH)
+            format!("✈ {total} Flieger über {display_name}: {joined}")
         }
         Ok(Err(e)) => {
             error!(error = ?e, input = %input, "!up command failed");
@@ -274,9 +247,7 @@ where
         }
     };
 
-    if let Err(e) = client.say_in_reply_to(privmsg, response).await {
-        error!(error = ?e, "Failed to send !up response");
-    }
+    sender.reply(privmsg, response).await;
 
     Ok(())
 }

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use eyre::Result;
 use tokio::sync::RwLock;
-use tracing::error;
 use twitch_irc::{login::LoginCredentials, transport::Transport};
 
 use super::{Command, CommandContext, normalize_username};
@@ -53,9 +52,7 @@ where
             (None, false) => format!("{target} hat noch keinen PB"),
         };
 
-        if let Err(e) = ctx.client.say_in_reply_to(ctx.privmsg, response).await {
-            error!(error = ?e, "Failed to send !pb response");
-        }
+        ctx.sender.reply(ctx.privmsg, response).await;
 
         Ok(())
     }

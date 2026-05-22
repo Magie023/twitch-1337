@@ -30,29 +30,16 @@ where
     async fn execute(&self, ctx: CommandContext<'_, T, L>) -> Result<()> {
         let input = ctx.args.join(" ");
         if input.trim().is_empty() {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
-                    ctx.privmsg,
-                    "Benutzung: !track <callsign/hex> FDM".to_string(),
-                )
-                .await
-            {
-                error!(error = ?e, "Failed to send usage message");
-            }
+            ctx.sender
+                .reply(ctx.privmsg, "Benutzung: !track <callsign/hex> FDM")
+                .await;
             return Ok(());
         }
 
         let identifier = match FlightIdentifier::parse(&input) {
             Ok(id) => id,
             Err(e) => {
-                if let Err(send_err) = ctx
-                    .client
-                    .say_in_reply_to(ctx.privmsg, format!("{e} FDM"))
-                    .await
-                {
-                    error!(error = ?send_err, "Failed to send invalid-identifier message");
-                }
+                ctx.sender.reply(ctx.privmsg, format!("{e} FDM")).await;
                 return Ok(());
             }
         };

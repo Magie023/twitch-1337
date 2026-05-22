@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use eyre::Result;
-use tracing::{error, warn};
+use tracing::warn;
 use twitch_irc::{login::LoginCredentials, transport::Transport};
 
 use crate::cooldown::{PerUserCooldown, format_cooldown_remaining};
@@ -288,19 +288,15 @@ where
     async fn execute(&self, ctx: CommandContext<'_, T, L>) -> Result<()> {
         let user = &ctx.privmsg.sender.login;
         if let Some(rem) = self.cooldown.check(user).await {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
+            ctx.sender
+                .reply(
                     ctx.privmsg,
                     format!(
                         "Bitte warte noch {} Waiting",
                         format_cooldown_remaining(rem)
                     ),
                 )
-                .await
-            {
-                error!(error = ?e, "Failed to send !döner cooldown");
-            }
+                .await;
             return Ok(());
         }
         // Record before any fallible work so that bad-input early returns
@@ -308,16 +304,12 @@ where
         self.cooldown.record(user).await;
 
         if ctx.args.is_empty() {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
+            ctx.sender
+                .reply(
                     ctx.privmsg,
-                    "Nutze: !döner <Zahl> — Umrechnung nutzt den Döneratlas-Deutschland-Ø. Stadtpreise: !dpi <Suche> FDM".to_string(),
+                    "Nutze: !döner <Zahl> — Umrechnung nutzt den Döneratlas-Deutschland-Ø. Stadtpreise: !dpi <Suche> FDM",
                 )
-                .await
-            {
-                error!(error = ?e, "Failed to send !döner usage");
-            }
+                .await;
             return Ok(());
         }
 
@@ -344,9 +336,7 @@ where
             },
         };
 
-        if let Err(e) = ctx.client.say_in_reply_to(ctx.privmsg, response).await {
-            error!(error = ?e, "Failed to send !döner response");
-        }
+        ctx.sender.reply(ctx.privmsg, response).await;
 
         Ok(())
     }

@@ -32,6 +32,7 @@ use crate::{
     database, ping,
     suspend::SuspensionManager,
     twitch::{
+        ChatSender,
         handlers::{
             commands::{CommandHandlerConfig, run_generic_command_handler},
             latency::run_latency_handler,
@@ -143,6 +144,10 @@ where
 
     let schedules_enabled = !config.schedules.is_empty();
 
+    // One sanitizing chat sender shared by every PRIVMSG-emitting handler.
+    // Tasks that need raw IRC framing (latency PING/PONG, JOINs) keep `client`.
+    let chat_sender = ChatSender::new(client.clone());
+
     // Flight tracker: spawned first so `tracker_tx` exists for the command handler.
     // The channel is pre-created by the caller (production: main.rs; tests: TestBotBuilder)
     // so the sender Arc can be shared with WebState before handlers are spawned.
@@ -150,12 +155,12 @@ where
         (Some(av), Some(rx)) => {
             let tx = aviation_tracker_tx.expect("tracker_tx must be Some when aviation is Some");
             let handle = tokio::spawn({
-                let client = client.clone();
+                let sender = chat_sender.clone();
                 let channel = config.twitch.channel.clone();
                 let dir = data_dir.clone();
                 let clk = clock.clone();
                 async move {
-                    aviation::run_flight_tracker(rx, client, channel, av, dir, clk).await;
+                    aviation::run_flight_tracker(rx, sender, channel, av, dir, clk).await;
                 }
             });
             (Some(tx), handle)
@@ -193,13 +198,13 @@ where
         });
 
         let handler = tokio::spawn({
-            let client = client.clone();
+            let sender = chat_sender.clone();
             let cache = schedule_cache.clone();
             let channel = config.twitch.channel.clone();
             let notify = shutdown_notify.clone();
             let clk = clock.clone();
             async move {
-                run_scheduled_message_handler(client, cache, channel, notify, clk).await;
+                run_scheduled_message_handler(sender, cache, channel, notify, clk).await;
             }
         });
 
@@ -234,14 +239,14 @@ where
 
     let tracker_1337 = tokio::spawn({
         let btx = broadcast_tx.clone();
-        let client = client.clone();
+        let sender = chat_sender.clone();
         let channel = config.twitch.channel.clone();
         let lat = latency_value.clone();
         let lb = leaderboard.clone();
         let clk = clock.clone();
         let dd = data_dir.clone();
         async move {
-            run_1337_handler(btx, client, channel, lat, lb, clk, dd).await;
+            run_1337_handler(btx, sender, channel, lat, lb, clk, dd).await;
         }
     });
 

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use eyre::Result;
 use tokio::sync::RwLock;
-use tracing::error;
 use twitch_irc::{login::LoginCredentials, transport::Transport};
 
 use super::{Command, CommandContext};
@@ -44,9 +43,7 @@ where
             "Noch keine Einträge vorhanden".to_string()
         };
 
-        if let Err(e) = ctx.client.say_in_reply_to(ctx.privmsg, response).await {
-            error!(error = ?e, "Failed to send leaderboard response");
-        }
+        ctx.sender.reply(ctx.privmsg, response).await;
 
         Ok(())
     }

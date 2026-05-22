@@ -25,7 +25,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use eyre::Result;
-use tracing::error;
 use twitch_irc::{login::LoginCredentials, transport::Transport};
 
 use super::{ADMIN_DENIED_MSG, Command, CommandContext, is_admin, normalize_command_name};
@@ -83,26 +82,16 @@ where
 
     async fn execute(&self, ctx: CommandContext<'_, T, L>) -> Result<()> {
         if !is_admin(ctx.privmsg, &self.hidden_admin_ids) {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(ctx.privmsg, ADMIN_DENIED_MSG.to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send admin-gate reply");
-            }
+            ctx.sender.reply(ctx.privmsg, ADMIN_DENIED_MSG).await;
             return Ok(());
         }
 
         let raw_cmd = match ctx.args.first() {
             Some(c) => *c,
             None => {
-                if let Err(e) = ctx
-                    .client
-                    .say_in_reply_to(ctx.privmsg, "Nutze: !suspend <command> [dauer]".to_string())
-                    .await
-                {
-                    error!(error = ?e, "Failed to send usage reply");
-                }
+                ctx.sender
+                    .reply(ctx.privmsg, "Nutze: !suspend <command> [dauer]")
+                    .await;
                 return Ok(());
             }
         };
@@ -110,16 +99,9 @@ where
         let cmd = normalize_command_name(raw_cmd);
 
         if EXEMPT_COMMANDS.contains(&cmd.as_str()) {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
-                    ctx.privmsg,
-                    "Das kann nicht gesperrt werden FDM".to_string(),
-                )
-                .await
-            {
-                error!(error = ?e, "Failed to send exempt reply");
-            }
+            ctx.sender
+                .reply(ctx.privmsg, "Das kann nicht gesperrt werden FDM")
+                .await;
             return Ok(());
         }
 
@@ -128,13 +110,9 @@ where
             Some(s) => match parse_duration(s) {
                 Ok(d) => d,
                 Err(err) => {
-                    if let Err(e) = ctx
-                        .client
-                        .say_in_reply_to(ctx.privmsg, duration_error_message(&err))
-                        .await
-                    {
-                        error!(error = ?e, "Failed to send duration-error reply");
-                    }
+                    ctx.sender
+                        .reply(ctx.privmsg, duration_error_message(&err))
+                        .await;
                     return Ok(());
                 }
             },
@@ -142,19 +120,15 @@ where
 
         self.manager.suspend(&cmd, duration).await;
 
-        if let Err(e) = ctx
-            .client
-            .say_in_reply_to(
+        ctx.sender
+            .reply(
                 ctx.privmsg,
                 format!(
                     "!{cmd} gesperrt für {}",
                     format_cooldown_remaining(duration)
                 ),
             )
-            .await
-        {
-            error!(error = ?e, "Failed to send suspend confirmation");
-        }
+            .await;
 
         Ok(())
     }
@@ -186,26 +160,16 @@ where
 
     async fn execute(&self, ctx: CommandContext<'_, T, L>) -> Result<()> {
         if !is_admin(ctx.privmsg, &self.hidden_admin_ids) {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(ctx.privmsg, ADMIN_DENIED_MSG.to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send admin-gate reply");
-            }
+            ctx.sender.reply(ctx.privmsg, ADMIN_DENIED_MSG).await;
             return Ok(());
         }
 
         let raw_cmd = match ctx.args.first() {
             Some(c) => *c,
             None => {
-                if let Err(e) = ctx
-                    .client
-                    .say_in_reply_to(ctx.privmsg, "Nutze: !unsuspend <command>".to_string())
-                    .await
-                {
-                    error!(error = ?e, "Failed to send usage reply");
-                }
+                ctx.sender
+                    .reply(ctx.privmsg, "Nutze: !unsuspend <command>")
+                    .await;
                 return Ok(());
             }
         };
@@ -218,9 +182,7 @@ where
             format!("!{cmd} war nicht gesperrt FDM")
         };
 
-        if let Err(e) = ctx.client.say_in_reply_to(ctx.privmsg, reply).await {
-            error!(error = ?e, "Failed to send unsuspend reply");
-        }
+        ctx.sender.reply(ctx.privmsg, reply).await;
 
         Ok(())
     }

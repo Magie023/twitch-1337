@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use eyre::Result;
 use tokio::sync::RwLock;
-use tracing::{debug, error};
+use tracing::debug;
 use twitch_irc::{login::LoginCredentials, transport::Transport};
 
 use super::{Command, CommandContext};
@@ -79,13 +79,13 @@ where
         let Some(ping_name) = parse_ping_trigger(ctx.trigger) else {
             return Ok(());
         };
-        let sender = &ctx.privmsg.sender.login;
+        let invoker = &ctx.privmsg.sender.login;
 
         let decision = {
             let mut manager = self.ping_manager.write().await;
             manager.try_record_trigger(
                 &ping_name,
-                sender,
+                invoker,
                 self.current_cooldown(),
                 self.current_public(),
             )
@@ -95,27 +95,23 @@ where
             TriggerDecision::Skip => return Ok(()),
             TriggerDecision::OnCooldown(remaining) => {
                 debug!(ping = %ping_name, "Ping on cooldown");
-                if let Err(e) = ctx
-                    .client
-                    .say_in_reply_to(
+                ctx.sender
+                    .reply(
                         ctx.privmsg,
                         format!(
                             "Bitte warte noch {} Waiting",
                             format_cooldown_remaining(remaining)
                         ),
                     )
-                    .await
-                {
-                    error!(error = ?e, "Failed to send cooldown message");
-                }
+                    .await;
                 return Ok(());
             }
             TriggerDecision::Fire(rendered) => rendered,
         };
 
-        ctx.client
+        ctx.sender
             .say(ctx.privmsg.channel_login.clone(), rendered)
-            .await?;
+            .await;
 
         Ok(())
     }

@@ -24,7 +24,6 @@ use crate::commands::{Command, CommandContext};
 use crate::cooldown::{PerUserCooldown, format_cooldown_remaining};
 use crate::settings::{Settings, SettingsHandle};
 use crate::twitch::seventv::SevenTvEmoteProvider;
-use crate::util::{MAX_RESPONSE_LENGTH, truncate_response};
 
 /// Chat history buffers and channel logins for `!ai`. Both buffers share the
 /// same type; `primary_history` is always present, `ai_channel_history` is
@@ -305,19 +304,15 @@ where
 
         if let Some(remaining) = self.cooldown.check(user).await {
             debug!(user = %user, remaining_secs = remaining.as_secs(), "AI command on cooldown");
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
+            ctx.sender
+                .reply(
                     ctx.privmsg,
                     format!(
                         "Bitte warte noch {} Waiting",
                         format_cooldown_remaining(remaining)
                     ),
                 )
-                .await
-            {
-                error!(error = ?e, "Failed to send cooldown message");
-            }
+                .await;
             return Ok(());
         }
 
@@ -332,13 +327,7 @@ where
             } else {
                 "Benutzung: !ai <anweisung>"
             };
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(ctx.privmsg, usage.to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send usage message");
-            }
+            ctx.sender.reply(ctx.privmsg, usage).await;
             return Ok(());
         }
 
@@ -509,26 +498,18 @@ where
             }
             Err(e) => {
                 warn!(error = ?e, "AI llm error");
-                if let Some(reply) = user_facing_provider_message(&e)
-                    && let Err(send_err) = ctx
-                        .client
-                        .say_in_reply_to(ctx.privmsg, reply.to_string())
-                        .await
-                {
-                    error!(error = ?send_err, "Failed to send AI provider-error reply");
+                if let Some(reply) = user_facing_provider_message(&e) {
+                    ctx.sender.reply(ctx.privmsg, reply).await;
                 }
                 None
             }
         };
 
         if let Some(text) = final_text {
-            let visible = clean_user_facing_ai_response(&text);
-            let line = truncate_response(visible, MAX_RESPONSE_LENGTH);
+            let line = clean_user_facing_ai_response(&text).to_string();
             if !line.is_empty() {
                 let ts = Utc::now();
-                if let Err(e) = ctx.client.say_in_reply_to(ctx.privmsg, line.clone()).await {
-                    error!(error = ?e, "Failed to send AI response");
-                }
+                ctx.sender.reply(ctx.privmsg, line.clone()).await;
                 if let Some(ref chat) = self.chat_ctx {
                     chat.buffer_for(&ctx.privmsg.channel_login)
                         .lock()

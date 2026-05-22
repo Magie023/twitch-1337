@@ -10,9 +10,6 @@ use eyre::Result;
 /// Application user-agent string used in HTTP requests.
 pub static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
 
-/// Maximum response length for Twitch chat (to stay within limits).
-pub const MAX_RESPONSE_LENGTH: usize = 500;
-
 /// Returns the data directory path, resolved from `$DATA_DIR` env var.
 ///
 /// Defaults to `/var/lib/twitch-1337` when the env var is not set.

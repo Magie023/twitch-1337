@@ -20,7 +20,7 @@ use crate::{
     ping,
     settings::SettingsHandle,
     suspend::SuspensionManager,
-    twitch::{seventv::SevenTvEmoteProvider, whisper::WhisperSender},
+    twitch::{ChatSender, seventv::SevenTvEmoteProvider, whisper::WhisperSender},
 };
 
 /// Configuration for the generic command handler.
@@ -318,9 +318,11 @@ where
         settings.clone(),
     )));
 
+    let sender = ChatSender::new(client.clone());
+
     run_command_dispatcher(
         broadcast_rx,
-        client,
+        sender,
         cmd_list,
         admin_channel,
         ai_channel,
@@ -371,7 +373,7 @@ fn is_twitch_login_char(ch: char) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_command_dispatcher<T, L>(
     mut broadcast_rx: broadcast::Receiver<ServerMessage>,
-    client: Arc<TwitchIRCClient<T, L>>,
+    sender: Arc<ChatSender<T, L>>,
     commands: Vec<Box<dyn crate::commands::Command<T, L>>>,
     admin_channel: Option<String>,
     ai_channel: Option<String>,
@@ -459,7 +461,7 @@ pub(crate) async fn run_command_dispatcher<T, L>(
                 let trigger = invocation.trigger;
                 let ctx = crate::commands::CommandContext {
                     privmsg: &privmsg,
-                    client: &client,
+                    sender: &sender,
                     trigger,
                     args: invocation.args,
                 };

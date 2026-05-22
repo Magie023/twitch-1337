@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use eyre::Result;
-use twitch_irc::{
-    TwitchIRCClient, login::LoginCredentials, message::PrivmsgMessage, transport::Transport,
-};
+use twitch_irc::{login::LoginCredentials, message::PrivmsgMessage, transport::Transport};
+
+use crate::twitch::ChatSender;
 
 pub mod doener;
 pub mod doener_calc;
@@ -58,8 +58,9 @@ pub fn normalize_username(raw: &str) -> String {
 pub struct CommandContext<'a, T: Transport, L: LoginCredentials> {
     /// The chat message that triggered the command.
     pub privmsg: &'a PrivmsgMessage,
-    /// The IRC client for sending responses.
-    pub client: &'a Arc<TwitchIRCClient<T, L>>,
+    /// Sanitizing chat sender for command responses. The only outbound
+    /// chat API commands are allowed to call.
+    pub sender: &'a Arc<ChatSender<T, L>>,
     /// The first word of the message that matched the command.
     pub trigger: &'a str,
     /// Remaining words after the command name.

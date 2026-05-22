@@ -13,7 +13,7 @@ use crate::ai::command::ChatContext;
 use crate::cooldown::{PerUserCooldown, format_cooldown_remaining};
 use crate::settings::SettingsHandle;
 use crate::twitch::whisper::{WHISPER_MAX_CHARS, WhisperSender};
-use crate::util::{MAX_RESPONSE_LENGTH, truncate_response};
+use crate::util::truncate_response;
 
 use super::{Command, CommandContext};
 
@@ -164,15 +164,8 @@ impl NewsCommand {
             );
         }
 
-        let chat_response = truncate_response(response, MAX_RESPONSE_LENGTH);
-        if let Err(error) = ctx
-            .client
-            .say_in_reply_to(ctx.privmsg, chat_response.clone())
-            .await
-        {
-            error!(error = ?error, "Failed to send news response");
-        }
-        chat_response
+        ctx.sender.reply(ctx.privmsg, response).await;
+        response.to_string()
     }
 }
 
@@ -206,49 +199,36 @@ where
 
         if let Some(remaining) = self.cooldown.check(user).await {
             debug!(user = %user, remaining_secs = remaining.as_secs(), "News command on cooldown");
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
+            ctx.sender
+                .reply(
                     ctx.privmsg,
                     format!(
                         "Bitte warte noch {} Waiting",
                         format_cooldown_remaining(remaining)
                     ),
                 )
-                .await
-            {
-                error!(error = ?e, "Failed to send cooldown message");
-            }
+                .await;
             return Ok(());
         }
 
         let Some(history_lines) = self.relevant_history(user, &ctx.privmsg.message_text).await
         else {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(ctx.privmsg, self.mode.empty_message().to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send empty-history message");
-            }
+            ctx.sender
+                .reply(ctx.privmsg, self.mode.empty_message())
+                .await;
             return Ok(());
         };
 
         if history_lines.is_empty() {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
+            ctx.sender
+                .reply(
                     ctx.privmsg,
                     match self.mode {
                         NewsMode::News => NO_NEW_MESSAGES_MESSAGE,
                         NewsMode::Tldr => NO_TLDR_MESSAGES_MESSAGE,
-                    }
-                    .to_string(),
+                    },
                 )
-                .await
-            {
-                error!(error = ?e, "Failed to send no-new-messages message");
-            }
+                .await;
             return Ok(());
         }
 
@@ -308,14 +288,7 @@ where
         if success {
             self.send_news_response(&ctx, &response).await;
         } else {
-            let chat_response = truncate_response(&response, MAX_RESPONSE_LENGTH);
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(ctx.privmsg, chat_response.clone())
-                .await
-            {
-                error!(error = ?e, "Failed to send news response");
-            }
+            ctx.sender.reply(ctx.privmsg, response).await;
         }
 
         Ok(())

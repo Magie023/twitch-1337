@@ -123,9 +123,7 @@ where
     T: Transport,
     L: LoginCredentials,
 {
-    if let Err(e) = ctx.client.say_in_reply_to(ctx.privmsg, line).await {
-        error!(error = ?e, "Failed to send !dpi response");
-    }
+    ctx.sender.reply(ctx.privmsg, line).await;
 }
 
 #[cfg(test)]

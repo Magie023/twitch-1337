@@ -2,9 +2,11 @@ use std::{path::Path, sync::Arc};
 
 use color_eyre::eyre::{Result, WrapErr};
 use tracing::{debug, error, info, instrument, warn};
-use twitch_irc::{TwitchIRCClient, login::LoginCredentials, transport::Transport};
+use twitch_irc::{login::LoginCredentials, transport::Transport};
 
-use crate::{config::Configuration, database, get_config_path, util::clock::Clock};
+use crate::{
+    config::Configuration, database, get_config_path, twitch::ChatSender, util::clock::Clock,
+};
 
 /// Parse a datetime string in ISO 8601 format (YYYY-MM-DDTHH:MM:SS).
 pub(crate) fn parse_datetime(s: &str) -> Result<chrono::NaiveDateTime> {
@@ -245,10 +247,10 @@ pub async fn run_config_watcher_service(cache: Arc<tokio::sync::RwLock<database:
 /// Run a single schedule task.
 /// This task will run the schedule at its configured interval,
 /// checking if it's still active before each post.
-#[instrument(skip(client, cache, channel, clock), fields(schedule = %schedule.name))]
+#[instrument(skip(sender, cache, channel, clock), fields(schedule = %schedule.name))]
 pub(crate) async fn run_schedule_task<T, L>(
     schedule: database::Schedule,
-    client: Arc<TwitchIRCClient<T, L>>,
+    sender: Arc<ChatSender<T, L>>,
     cache: Arc<tokio::sync::RwLock<database::ScheduleCache>>,
     channel: String,
     shutdown: Arc<tokio::sync::Notify>,
@@ -312,15 +314,8 @@ pub(crate) async fn run_schedule_task<T, L>(
             "Posting scheduled message"
         );
 
-        if let Err(e) = client.say(channel.clone(), schedule.message.clone()).await {
-            error!(
-                error = ?e,
-                schedule = %schedule.name,
-                "Failed to send scheduled message"
-            );
-        } else {
-            debug!(schedule = %schedule.name, "Scheduled message posted successfully");
-        }
+        sender.say(channel.clone(), schedule.message.clone()).await;
+        debug!(schedule = %schedule.name, "Scheduled message posted");
     }
 
     info!(schedule = %schedule.name, "Schedule task exiting");
@@ -328,9 +323,9 @@ pub(crate) async fn run_schedule_task<T, L>(
 
 /// Dynamic scheduled message handler that monitors cache for changes.
 /// Spawns and stops tasks dynamically based on cache updates.
-#[instrument(skip(client, cache, channel, clock))]
+#[instrument(skip(sender, cache, channel, clock))]
 pub async fn run_scheduled_message_handler<T, L>(
-    client: Arc<TwitchIRCClient<T, L>>,
+    sender: Arc<ChatSender<T, L>>,
     cache: Arc<tokio::sync::RwLock<database::ScheduleCache>>,
     channel: String,
     shutdown: Arc<tokio::sync::Notify>,
@@ -424,7 +419,7 @@ pub async fn run_scheduled_message_handler<T, L>(
                     let captured = schedule.clone();
                     let handle = tokio::spawn(run_schedule_task(
                         schedule,
-                        client.clone(),
+                        sender.clone(),
                         cache.clone(),
                         channel,
                         shutdown,

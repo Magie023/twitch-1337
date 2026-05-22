@@ -11,7 +11,6 @@ use llm::{ChatCompletionRequest, LlmClient, Message, TraceIds};
 use crate::ai::command::ChatContext;
 use crate::cooldown::{PerUserCooldown, format_cooldown_remaining};
 use crate::settings::SettingsHandle;
-use crate::util::MAX_RESPONSE_LENGTH;
 
 use super::{Command, CommandContext};
 
@@ -97,7 +96,7 @@ fn format_haiku_for_chat(raw: &str) -> Option<String> {
         return None;
     }
 
-    Some(truncate_plain(&parts.join(" / "), MAX_RESPONSE_LENGTH))
+    Some(parts.join(" / "))
 }
 
 fn is_valid_haiku_part(part: &str) -> bool {
@@ -116,15 +115,6 @@ fn is_valid_haiku_part(part: &str) -> bool {
     true
 }
 
-fn truncate_plain(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let mut out: String = text.chars().take(max_chars.saturating_sub(3)).collect();
-    out.push_str("...");
-    out
-}
-
 #[async_trait]
 impl<T, L> Command<T, L> for HaikuCommand
 where
@@ -141,31 +131,21 @@ where
 
         if let Some(remaining) = self.cooldown.check(user).await {
             debug!(user = %user, remaining_secs = remaining.as_secs(), "Haiku command on cooldown");
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
+            ctx.sender
+                .reply(
                     ctx.privmsg,
                     format!(
                         "Bitte warte noch {} Waiting",
                         format_cooldown_remaining(remaining)
                     ),
                 )
-                .await
-            {
-                error!(error = ?e, "Failed to send cooldown message");
-            }
+                .await;
             return Ok(());
         }
 
         let Some(history_lines) = self.relevant_history(user, &ctx.privmsg.message_text).await
         else {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(ctx.privmsg, EMPTY_HISTORY_MESSAGE.to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send empty-history message");
-            }
+            ctx.sender.reply(ctx.privmsg, EMPTY_HISTORY_MESSAGE).await;
             return Ok(());
         };
 
@@ -217,9 +197,7 @@ where
             self.cooldown.record(user).await;
         }
 
-        if let Err(e) = ctx.client.say_in_reply_to(ctx.privmsg, response).await {
-            error!(error = ?e, "Failed to send haiku response");
-        }
+        ctx.sender.reply(ctx.privmsg, response).await;
 
         Ok(())
     }

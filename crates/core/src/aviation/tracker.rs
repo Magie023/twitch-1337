@@ -7,13 +7,12 @@ use tokio::fs;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
-use twitch_irc::{
-    TwitchIRCClient, login::LoginCredentials, message::PrivmsgMessage, transport::Transport,
-};
+use twitch_irc::{login::LoginCredentials, message::PrivmsgMessage, transport::Transport};
 
 use crate::aviation::{
     AltBaro, AviationClient, AviationstackFlightMetadata, NearbyAircraft, iata_to_coords,
 };
+use crate::twitch::ChatSender;
 use crate::util::clock::Clock;
 
 const FLIGHTS_FILENAME: &str = "flights.ron";
@@ -975,7 +974,7 @@ pub(crate) fn compute_poll_interval(flights: &[TrackedFlight]) -> Duration {
 /// state changes, and posts chat messages.
 pub async fn run_flight_tracker<T, L>(
     mut cmd_rx: mpsc::Receiver<TrackerCommand>,
-    client: Arc<TwitchIRCClient<T, L>>,
+    sender: Arc<ChatSender<T, L>>,
     channel: String,
     aviation_client: AviationClient,
     data_dir: PathBuf,
@@ -997,7 +996,7 @@ pub async fn run_flight_tracker<T, L>(
             process_command(
                 cmd,
                 &mut state,
-                &client,
+                &sender,
                 &aviation_client,
                 &data_dir,
                 &*clock,
@@ -1009,7 +1008,7 @@ pub async fn run_flight_tracker<T, L>(
                 process_command(
                     cmd,
                     &mut state,
-                    &client,
+                    &sender,
                     &aviation_client,
                     &data_dir,
                     &*clock,
@@ -1021,7 +1020,7 @@ pub async fn run_flight_tracker<T, L>(
             // stay far below the live cadence until their departure window.
             poll_all_flights(
                 &mut state,
-                &client,
+                &sender,
                 &channel,
                 &aviation_client,
                 &data_dir,
@@ -1045,7 +1044,7 @@ pub async fn run_flight_tracker<T, L>(
                             process_command(
                                 cmd,
                                 &mut state,
-                                &client,
+                                &sender,
                                 &aviation_client,
                                 &data_dir,
                                 &*clock,
@@ -1066,7 +1065,7 @@ pub async fn run_flight_tracker<T, L>(
 async fn process_command<T, L>(
     cmd: TrackerCommand,
     state: &mut FlightTrackerState,
-    client: &Arc<TwitchIRCClient<T, L>>,
+    sender: &Arc<ChatSender<T, L>>,
     aviation_client: &AviationClient,
     data_dir: &Path,
     clock: &dyn Clock,
@@ -1085,7 +1084,7 @@ async fn process_command<T, L>(
                 &requested_by,
                 &reply_to,
                 state,
-                client,
+                sender,
                 aviation_client,
                 data_dir,
                 clock,
@@ -1104,7 +1103,7 @@ async fn process_command<T, L>(
                 is_mod,
                 &reply_to,
                 state,
-                client,
+                sender,
                 data_dir,
             )
             .await;
@@ -1113,7 +1112,7 @@ async fn process_command<T, L>(
             identifier,
             reply_to,
         } => {
-            handle_status(identifier.as_deref(), &reply_to, state, client, clock).await;
+            handle_status(identifier.as_deref(), &reply_to, state, sender, clock).await;
         }
         TrackerCommand::Snapshot { reply } => {
             let now = clock.now_utc();
@@ -1133,7 +1132,7 @@ async fn handle_track<T, L>(
     requested_by: &str,
     reply_to: &PrivmsgMessage,
     state: &mut FlightTrackerState,
-    client: &Arc<TwitchIRCClient<T, L>>,
+    sender: &Arc<ChatSender<T, L>>,
     aviation_client: &AviationClient,
     data_dir: &Path,
     clock: &dyn Clock,
@@ -1143,10 +1142,12 @@ async fn handle_track<T, L>(
 {
     // Check global limit
     if state.flights.len() >= MAX_TRACKED_FLIGHTS {
-        let msg = format!("Maximal {MAX_TRACKED_FLIGHTS} Flüge gleichzeitig FDM");
-        if let Err(e) = client.say_in_reply_to(reply_to, msg).await {
-            error!(error = ?e, "Failed to send limit message");
-        }
+        sender
+            .reply(
+                reply_to,
+                format!("Maximal {MAX_TRACKED_FLIGHTS} Flüge gleichzeitig FDM"),
+            )
+            .await;
         return;
     }
 
@@ -1157,10 +1158,12 @@ async fn handle_track<T, L>(
         .filter(|f| f.tracked_by == requested_by)
         .count();
     if user_count >= MAX_FLIGHTS_PER_USER {
-        let msg = format!("Du trackst schon {MAX_FLIGHTS_PER_USER} Flüge FDM");
-        if let Err(e) = client.say_in_reply_to(reply_to, msg).await {
-            error!(error = ?e, "Failed to send per-user limit message");
-        }
+        sender
+            .reply(
+                reply_to,
+                format!("Du trackst schon {MAX_FLIGHTS_PER_USER} Flüge FDM"),
+            )
+            .await;
         return;
     }
 
@@ -1169,10 +1172,9 @@ async fn handle_track<T, L>(
         f.identifier == identifier || identifier.matches(f.callsign.as_deref(), f.hex.as_deref())
     });
     if already_tracked {
-        let msg = format!("{} wird schon getrackt FDM", identifier);
-        if let Err(e) = client.say_in_reply_to(reply_to, msg).await {
-            error!(error = ?e, "Failed to send duplicate message");
-        }
+        sender
+            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .await;
         return;
     }
 
@@ -1195,10 +1197,9 @@ async fn handle_track<T, L>(
                     .is_some_and(|cs| cs.eq_ignore_ascii_case(resolved))
         });
         if already_tracked {
-            let msg = format!("{} wird schon getrackt FDM", identifier);
-            if let Err(e) = client.say_in_reply_to(reply_to, msg).await {
-                error!(error = ?e, "Failed to send duplicate message");
-            }
+            sender
+                .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+                .await;
             return;
         }
     }
@@ -1238,31 +1239,25 @@ async fn handle_track<T, L>(
             }
 
             if metadata.is_none() {
-                let msg = format!("{} nicht gefunden im ADS-B FDM", identifier);
-                if let Err(e) = client.say_in_reply_to(reply_to, msg).await {
-                    error!(error = ?e, "Failed to send not-found message");
-                }
+                sender
+                    .reply(
+                        reply_to,
+                        format!("{identifier} nicht gefunden im ADS-B FDM"),
+                    )
+                    .await;
                 return;
             }
             None
         }
         Ok(Err(e)) => {
             error!(error = ?e, identifier = %identifier, "ADS-B lookup failed");
-            if let Err(e) = client
-                .say_in_reply_to(reply_to, "ADS-B Anfrage fehlgeschlagen FDM".to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send error message");
-            }
+            sender
+                .reply(reply_to, "ADS-B Anfrage fehlgeschlagen FDM")
+                .await;
             return;
         }
         Err(_) => {
-            if let Err(e) = client
-                .say_in_reply_to(reply_to, "ADS-B Anfrage Timeout FDM".to_string())
-                .await
-            {
-                error!(error = ?e, "Failed to send timeout message");
-            }
+            sender.reply(reply_to, "ADS-B Anfrage Timeout FDM").await;
             return;
         }
     };
@@ -1356,9 +1351,7 @@ async fn handle_track<T, L>(
     save_tracker_state(data_dir, state).await;
 
     info!(identifier = %identifier, requested_by = %requested_by, "Flight tracking started");
-    if let Err(e) = client.say_in_reply_to(reply_to, response).await {
-        error!(error = ?e, "Failed to send track started message");
-    }
+    sender.reply(reply_to, response).await;
 }
 
 async fn handle_untrack<T, L>(
@@ -1367,34 +1360,28 @@ async fn handle_untrack<T, L>(
     is_mod: bool,
     reply_to: &PrivmsgMessage,
     state: &mut FlightTrackerState,
-    client: &Arc<TwitchIRCClient<T, L>>,
+    sender: &Arc<ChatSender<T, L>>,
     data_dir: &Path,
 ) where
     T: Transport,
     L: LoginCredentials,
 {
     let Some(idx) = find_flight_index(&state.flights, identifier) else {
-        if let Err(e) = client
-            .say_in_reply_to(reply_to, format!("{identifier} nicht gefunden FDM"))
-            .await
-        {
-            error!(error = ?e, "Failed to send not-found message");
-        }
+        sender
+            .reply(reply_to, format!("{identifier} nicht gefunden FDM"))
+            .await;
         return;
     };
 
     // Check permissions: only the user who tracked it or mods can untrack
     let flight = &state.flights[idx];
     if flight.tracked_by != requested_by && !is_mod {
-        if let Err(e) = client
-            .say_in_reply_to(
+        sender
+            .reply(
                 reply_to,
-                "Nur der Tracker oder Mods können das untracking machen FDM".to_string(),
+                "Nur der Tracker oder Mods können das untracking machen FDM",
             )
-            .await
-        {
-            error!(error = ?e, "Failed to send permission message");
-        }
+            .await;
         return;
     }
 
@@ -1402,19 +1389,16 @@ async fn handle_untrack<T, L>(
         .await
         .unwrap_or_else(|| identifier.to_owned());
 
-    if let Err(e) = client
-        .say_in_reply_to(reply_to, format!("{name} wird nicht mehr getrackt Okayge"))
-        .await
-    {
-        error!(error = ?e, "Failed to send untrack message");
-    }
+    sender
+        .reply(reply_to, format!("{name} wird nicht mehr getrackt Okayge"))
+        .await;
 }
 
 async fn handle_status<T, L>(
     identifier: Option<&str>,
     reply_to: &PrivmsgMessage,
     state: &FlightTrackerState,
-    client: &Arc<TwitchIRCClient<T, L>>,
+    sender: &Arc<ChatSender<T, L>>,
     clock: &dyn Clock,
 ) where
     T: Transport,
@@ -1428,14 +1412,12 @@ async fn handle_status<T, L>(
         },
     };
 
-    if let Err(e) = client.say_in_reply_to(reply_to, response).await {
-        error!(error = ?e, "Failed to send status message");
-    }
+    sender.reply(reply_to, response).await;
 }
 
 async fn poll_all_flights<T, L>(
     state: &mut FlightTrackerState,
-    client: &Arc<TwitchIRCClient<T, L>>,
+    sender: &Arc<ChatSender<T, L>>,
     channel: &str,
     aviation_client: &AviationClient,
     data_dir: &Path,
@@ -1735,9 +1717,7 @@ async fn poll_all_flights<T, L>(
 
     // Post messages
     for msg in messages {
-        if let Err(e) = client.say(channel.to_string(), msg).await {
-            error!(error = ?e, "Failed to send flight tracker message");
-        }
+        sender.say(channel.to_string(), msg).await;
     }
 
     // Persist if any state changed

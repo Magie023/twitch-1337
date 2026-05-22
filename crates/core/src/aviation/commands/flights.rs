@@ -64,16 +64,9 @@ where
     async fn execute(&self, ctx: CommandContext<'_, T, L>) -> Result<()> {
         let input = ctx.args.join(" ");
         if input.trim().is_empty() {
-            if let Err(e) = ctx
-                .client
-                .say_in_reply_to(
-                    ctx.privmsg,
-                    "Benutzung: !flight <callsign/hex> FDM".to_string(),
-                )
-                .await
-            {
-                error!(error = ?e, "Failed to send usage message");
-            }
+            ctx.sender
+                .reply(ctx.privmsg, "Benutzung: !flight <callsign/hex> FDM")
+                .await;
             return Ok(());
         }
 
