@@ -61,7 +61,8 @@
       </div>
     </div>
 
-    {% let dreamer_or = current.ai.connection.base_url.as_deref().unwrap_or("").contains("openrouter.ai") %}
+    {% let dreamer_base_url = current.ai.connection.base_url.as_deref().unwrap_or("") %}
+    {% let dreamer_or = current.ai.connection.backend.as_str() == "openai" && (dreamer_base_url.is_empty() || dreamer_base_url.contains("openrouter.ai")) %}
     {% if dreamer_or %}
     {% let dreamer_tier = current.ai.dreamer.service_tier.as_deref().unwrap_or("none") %}
     <div class="settings-row" data-section="ai_dreamer" data-card-enabled-by="ai_dreamer_enabled">

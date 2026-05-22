@@ -425,6 +425,41 @@ async fn settings_page_renders_all_ai_cards() {
 }
 
 #[tokio::test]
+async fn settings_page_shows_openrouter_tiers_for_default_base_url() {
+    // The OpenAI-compatible client defaults an empty base URL to OpenRouter.
+    // The dashboard must expose OpenRouter-only controls for that effective
+    // runtime configuration, not only after an explicit URL override.
+    install_crypto();
+    let (mut state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    state.owner_id = Some(Arc::from("123"));
+    let (sid, csrf_cookie, _bare) = insert_session_as(&state, "123", "owner", Role::Owner);
+
+    assert!(
+        state.settings.load().ai.connection.base_url.is_none(),
+        "fixture must exercise the provider-default base URL path"
+    );
+
+    let app = build_router(state);
+    let req = Request::builder()
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "owner GET /settings must 200");
+    let html = body_string(res).await;
+
+    assert!(
+        html.contains("name=\"ai_connection_service_tier\""),
+        "connection service_tier control must render for default OpenRouter base URL"
+    );
+    assert!(
+        html.contains("name=\"ai_dreamer_service_tier\""),
+        "dreamer service_tier control must render for default OpenRouter base URL"
+    );
+}
+
+#[tokio::test]
 async fn reset_cooldowns_clears_section_overrides() {
     install_crypto();
     let (mut state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;

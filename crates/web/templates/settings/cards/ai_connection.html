@@ -72,7 +72,7 @@
       </div>
     </div>
     {% endif %}
-    {% let conn_or = conn_base_url.contains("openrouter.ai") %}
+    {% let conn_or = current.ai.connection.backend.as_str() == "openai" && (conn_base_url.is_empty() || conn_base_url.contains("openrouter.ai")) %}
     {% if conn_or %}
     {% let tier = current.ai.connection.service_tier.as_deref().unwrap_or("none") %}
     <div class="settings-row" data-section="ai_connection">
