@@ -11,7 +11,7 @@ use llm::{ChatCompletionRequest, LlmClient, Message, TraceIds};
 
 use crate::ai::command::ChatContext;
 use crate::cooldown::{PerUserCooldown, format_cooldown_remaining};
-use crate::settings::{Settings, SettingsHandle};
+use crate::settings::SettingsHandle;
 use crate::twitch::whisper::{WHISPER_MAX_CHARS, WhisperSender};
 use crate::util::{MAX_RESPONSE_LENGTH, truncate_response};
 
@@ -65,15 +65,11 @@ impl NewsMode {
     }
 }
 
-fn news_cooldown_duration(s: &Settings) -> Duration {
-    Duration::from_secs(s.cooldowns.news)
-}
-
 pub struct NewsCommand {
     llm_client: Arc<dyn LlmClient>,
     settings: SettingsHandle,
     mode: NewsMode,
-    cooldown: PerUserCooldown,
+    cooldown: Arc<PerUserCooldown>,
     chat_ctx: Option<ChatContext>,
     whisper: Option<Arc<dyn WhisperSender>>,
 }
@@ -85,8 +81,8 @@ impl NewsCommand {
         mode: NewsMode,
         chat_ctx: Option<ChatContext>,
         whisper: Option<Arc<dyn WhisperSender>>,
+        cooldown: Arc<PerUserCooldown>,
     ) -> Self {
-        let cooldown = PerUserCooldown::live(settings.clone(), news_cooldown_duration);
         Self {
             llm_client,
             settings,

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use eyre::Result;
@@ -9,6 +10,7 @@ use twitch_irc::{
 pub mod doener;
 pub mod doener_calc;
 pub mod feedback;
+pub mod haiku;
 pub mod leaderboard;
 pub mod news;
 pub mod pb;
@@ -19,6 +21,11 @@ pub mod suspend;
 /// German rejection reply used by admin-gated commands when the sender
 /// lacks the required badge or id.
 pub const ADMIN_DENIED_MSG: &str = "Das darfst du nicht FDM";
+
+/// Per-user cooldown duration for `!news`, `!tldr`, and `!haiku` (shared bucket).
+pub fn news_cooldown_duration(s: &crate::settings::Settings) -> Duration {
+    Duration::from_secs(s.cooldowns.news)
+}
 
 /// Returns true if the author of `privmsg` is allowed to run admin commands:
 /// carries a broadcaster or moderator badge, or their user id is in
