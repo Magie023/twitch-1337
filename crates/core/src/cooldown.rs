@@ -29,9 +29,10 @@ impl CooldownSource {
 /// Stores the last usage timestamp per user and checks whether the cooldown
 /// period has elapsed. Thread-safe via internal `Mutex`.
 ///
-/// Prefer [`PerUserCooldown::live`] so that dashboard edits take effect on the
-/// next command invocation without a restart. [`PerUserCooldown::fixed`] is
-/// provided for commands that are not yet wired to `SettingsHandle`.
+/// Use [`PerUserCooldown::live`] so that dashboard edits take effect on the
+/// next command invocation without a restart. The deprecated
+/// [`PerUserCooldown::fixed`] constructor is retained only for tests that
+/// don't need live updates.
 pub struct PerUserCooldown {
     source: CooldownSource,
     last_use: Mutex<HashMap<String, Instant>>,
@@ -50,6 +51,7 @@ impl PerUserCooldown {
 
     /// Create a cooldown tracker with a fixed duration baked in at construction
     /// time. Dashboard edits do not affect it until the bot restarts.
+    #[deprecated(note = "use ::live with SettingsHandle; remaining callers are test helpers")]
     pub fn fixed(duration: Duration) -> Self {
         Self {
             source: CooldownSource::Fixed(duration),

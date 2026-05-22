@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,6 +85,16 @@ where
     /// Default: exact match on `name()`.
     fn matches(&self, word: &str) -> bool {
         self.name() == word
+    }
+
+    /// Key used when looking up suspension state. The default normalizes the
+    /// trigger word (strip leading `!`s, ASCII-lowercase) so it matches what
+    /// `SuspendCommand` writes for a single-trigger command. Override when the
+    /// matcher accepts multiple triggers that should share one suspension key
+    /// (e.g. `AiCommand` returns `"ai"` so both `!ai` and `@grok` collapse to
+    /// the same entry).
+    fn suspend_key(&self, trigger: &str) -> Cow<'_, str> {
+        Cow::Owned(normalize_command_name(trigger))
     }
 
     /// Execute the command with the given context.

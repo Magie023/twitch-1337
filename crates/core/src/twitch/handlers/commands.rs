@@ -14,6 +14,7 @@ use twitch_irc::{
 use crate::{
     ChatHistory, ChatHistoryBuffer, PersonalBest, ai,
     ai::chat_history::{ai_channel_history_capacity, primary_history_capacity},
+    ai::command::{GROK_ALIAS_TRIGGER, is_ai_trigger},
     aviation, commands,
     config::{AiBootstrap, SuspendConfig},
     ping,
@@ -21,8 +22,6 @@ use crate::{
     suspend::SuspensionManager,
     twitch::{seventv::SevenTvEmoteProvider, whisper::WhisperSender},
 };
-
-const GROK_ALIAS_TRIGGER: &str = "@grok";
 
 /// Configuration for the generic command handler.
 pub struct CommandHandlerConfig<T: Transport, L: LoginCredentials> {
@@ -175,7 +174,7 @@ where
         Box::new(aviation::commands::random_flight::RandomFlightCommand),
         Box::new(aviation::commands::flights_above::FlightsAboveCommand::new(
             aviation_client,
-            Duration::from_secs(snapshot.cooldowns.up),
+            settings.clone(),
         )),
         Box::new(commands::leaderboard::LeaderboardCommand::new(
             leaderboard.clone(),
@@ -183,7 +182,7 @@ where
         Box::new(commands::pb::PbCommand::new(leaderboard)),
         Box::new(commands::feedback::FeedbackCommand::new(
             data_dir.clone(),
-            Duration::from_secs(snapshot.cooldowns.feedback),
+            settings.clone(),
         )),
         Box::new(commands::doener::DoenerCommand::new(
             doener.clone(),
@@ -366,14 +365,6 @@ fn is_twitch_login_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
-/// Returns true if the trigger word resolves to the `!ai` command.
-///
-/// Mirrors `AiCommand::matches` plus the Grok alias used by `command_invocation`.
-fn is_ai_trigger(trigger: &str) -> bool {
-    let trimmed = trigger.strip_prefix('!').unwrap_or(trigger);
-    trimmed.eq_ignore_ascii_case("ai") || trigger.eq_ignore_ascii_case(GROK_ALIAS_TRIGGER)
-}
-
 /// Main dispatch loop for trait-based commands.
 // Two separate history buffers (primary + ai_channel) push this over the 7-arg limit;
 // wrapping them in a struct would add noise without clarity gain.
@@ -450,9 +441,12 @@ pub(crate) async fn run_command_dispatcher<T, L>(
                     continue;
                 };
 
-                // Must match SuspendCommand's normalization, else admin
-                // suspensions silently miss the dispatcher hook.
-                let suspend_key = crate::commands::normalize_command_name(invocation.trigger);
+                // Contract: `SuspendCommand` normalizes user input via
+                // `normalize_command_name`; commands expose `suspend_key()`
+                // that must match. The trigger word is fed in so commands
+                // whose `name()` is a placeholder (e.g. `PingTriggerCommand`
+                // returns `!<ping>`) can still produce the right key.
+                let suspend_key = cmd.suspend_key(invocation.trigger);
                 if suspension_manager
                     .is_suspended(&suspend_key)
                     .await
@@ -487,37 +481,5 @@ pub(crate) async fn run_command_dispatcher<T, L>(
                 break;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod ai_trigger_tests {
-    use super::is_ai_trigger;
-
-    #[test]
-    fn matches_bang_ai_case_insensitive() {
-        assert!(is_ai_trigger("!ai"));
-        assert!(is_ai_trigger("!AI"));
-        assert!(is_ai_trigger("!Ai"));
-    }
-
-    #[test]
-    fn matches_grok_alias() {
-        // GROK_ALIAS_TRIGGER lives in the same module; whatever it is,
-        // is_ai_trigger should accept the literal value plus its uppercase form.
-        assert!(is_ai_trigger(super::GROK_ALIAS_TRIGGER));
-        assert!(is_ai_trigger(&super::GROK_ALIAS_TRIGGER.to_uppercase()));
-    }
-
-    #[test]
-    fn rejects_other_triggers() {
-        assert!(!is_ai_trigger("!lb"));
-        assert!(!is_ai_trigger("!p"));
-        assert!(!is_ai_trigger("!track"));
-        assert!(!is_ai_trigger("!up"));
-        assert!(!is_ai_trigger("!fb"));
-        assert!(!is_ai_trigger(""));
-        assert!(!is_ai_trigger("!"));
-        assert!(!is_ai_trigger("ai_chan"));
     }
 }

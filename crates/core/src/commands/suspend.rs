@@ -7,6 +7,18 @@
 //! Both commands are gated to broadcaster/moderator badges or user ids listed
 //! in `twitch.hidden_admins`. The commands `suspend`, `unsuspend`, and `p`
 //! cannot be suspended (enforced in [`SuspendCommand`]).
+//!
+//! ## Suspension key contract
+//!
+//! `SuspendCommand` normalizes the user-supplied command name via
+//! [`super::normalize_command_name`] (strip leading `!`s, ASCII-lowercase) and
+//! stores that string in the [`SuspensionManager`]. The dispatcher looks up
+//! suspensions by [`super::Command::suspend_key`], which must produce the
+//! same string. The default implementation normalizes the dispatched trigger
+//! word, which matches what users type for single-trigger commands. Commands
+//! with multiple triggers (e.g. `AiCommand` matches both `!ai` and `@grok`)
+//! override `suspend_key` to expose a single canonical key — looking up by
+//! raw trigger word would miss the alias.
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -236,6 +236,39 @@ async fn unsuspend_unknown_command_replies_not_suspended() {
 }
 
 #[tokio::test]
+async fn suspending_ai_also_blocks_grok_alias() {
+    let bot = TestBotBuilder::new()
+        .with_ai()
+        .with_settings(|o| {
+            o.ai.history.length = Some(0);
+        })
+        .spawn()
+        .await;
+    bot.llm.push_tool_message("should not be sent");
+
+    let mut bot = bot;
+
+    // Broadcaster suspends !ai for 1m.
+    bot.send_as_broadcaster("broadcaster", "!suspend ai 1m")
+        .await;
+    let confirm = bot.expect_say(Duration::from_secs(2)).await;
+    assert!(
+        confirm.contains("!ai") && confirm.contains("gesperrt"),
+        "expected suspend confirmation, got: {confirm}"
+    );
+
+    // @grok routes through the same suspension key — must be silent too.
+    bot.send("alice", "@grok hi").await;
+    bot.expect_silent(Duration::from_millis(500)).await;
+
+    // And !ai itself is also silent.
+    bot.send("alice", "!ai hi").await;
+    bot.expect_silent(Duration::from_millis(500)).await;
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
 async fn ping_can_be_suspended() {
     let mut bot = TestBotBuilder::new().spawn().await;
 

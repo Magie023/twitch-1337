@@ -303,6 +303,9 @@ where
             }
             return Ok(());
         }
+        // Record before any fallible work so that bad-input early returns
+        // can't be spammed past the gate.
+        self.cooldown.record(user).await;
 
         if ctx.args.is_empty() {
             if let Err(e) = ctx
@@ -340,8 +343,6 @@ where
                 }
             },
         };
-
-        self.cooldown.record(user).await;
 
         if let Err(e) = ctx.client.say_in_reply_to(ctx.privmsg, response).await {
             error!(error = ?e, "Failed to send !döner response");

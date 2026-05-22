@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -119,7 +120,7 @@ pub struct AiCommandDeps {
     pub doener: Arc<crate::doener::DoeneratlasClient>,
 }
 
-const GROK_ALIAS_TRIGGER: &str = "@grok";
+pub const GROK_ALIAS_TRIGGER: &str = "@grok";
 const GROK_REPLY_DEFAULT_INSTRUCTION: &str =
     "Prüfe die Reply-Nachricht, ordne sie ein und antworte kurz im Twitch-Chat-Stil.";
 const GROK_SYSTEM_APPENDIX: &str = "\
@@ -212,6 +213,15 @@ fn is_grok_alias(trigger: &str) -> bool {
     trigger.eq_ignore_ascii_case(GROK_ALIAS_TRIGGER)
 }
 
+/// Returns true if `word` resolves to the `!ai` command — either the literal
+/// `!ai` trigger (case-insensitive) or the `@grok` alias (case-insensitive).
+/// Both `AiCommand::matches` and the command-dispatch ai-channel gate must use
+/// this helper, otherwise the gate and the matcher would silently disagree on
+/// non-lowercase invocations.
+pub fn is_ai_trigger(word: &str) -> bool {
+    word.eq_ignore_ascii_case("!ai") || word.eq_ignore_ascii_case(GROK_ALIAS_TRIGGER)
+}
+
 fn clean_user_facing_ai_response(text: &str) -> &str {
     let trimmed = text.trim_start();
     for marker in ["thought", "analysis", "final"] {
@@ -280,7 +290,12 @@ where
     }
 
     fn matches(&self, word: &str) -> bool {
-        word == "!ai" || is_grok_alias(word)
+        is_ai_trigger(word)
+    }
+
+    fn suspend_key(&self, _trigger: &str) -> Cow<'_, str> {
+        // Both !ai and the @grok alias share a single suspension entry.
+        Cow::Borrowed("ai")
     }
 
     #[instrument(skip(self, ctx))]
@@ -587,4 +602,40 @@ pub async fn build_ai_memory_v2(
         max_writes_per_turn: settings.ai.behavior.max_writes_per_turn,
         turn_timeout: Duration::from_secs(settings.ai.connection.timeout),
     }))
+}
+
+#[cfg(test)]
+mod ai_trigger_tests {
+    use super::{GROK_ALIAS_TRIGGER, is_ai_trigger};
+
+    #[test]
+    fn matches_bang_ai_case_insensitive() {
+        assert!(is_ai_trigger("!ai"));
+        assert!(is_ai_trigger("!AI"));
+        assert!(is_ai_trigger("!Ai"));
+        assert!(is_ai_trigger("!aI"));
+    }
+
+    #[test]
+    fn matches_grok_alias_case_insensitive() {
+        assert!(is_ai_trigger(GROK_ALIAS_TRIGGER));
+        assert!(is_ai_trigger(&GROK_ALIAS_TRIGGER.to_uppercase()));
+        assert!(is_ai_trigger("@GROK"));
+        assert!(is_ai_trigger("@Grok"));
+        assert!(is_ai_trigger("@gRoK"));
+    }
+
+    #[test]
+    fn rejects_other_triggers() {
+        assert!(!is_ai_trigger("!lb"));
+        assert!(!is_ai_trigger("!p"));
+        assert!(!is_ai_trigger("!track"));
+        assert!(!is_ai_trigger("!up"));
+        assert!(!is_ai_trigger("!fb"));
+        assert!(!is_ai_trigger(""));
+        assert!(!is_ai_trigger("!"));
+        assert!(!is_ai_trigger("ai_chan"));
+        assert!(!is_ai_trigger("ai"));
+        assert!(!is_ai_trigger("grok"));
+    }
 }

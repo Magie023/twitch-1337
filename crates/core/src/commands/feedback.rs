@@ -10,8 +10,13 @@ use twitch_irc::{login::LoginCredentials, transport::Transport};
 
 use super::{Command, CommandContext};
 use crate::cooldown::{PerUserCooldown, format_cooldown_remaining};
+use crate::settings::{Settings, SettingsHandle};
 
 const FEEDBACK_FILENAME: &str = "feedback.txt";
+
+fn feedback_cooldown_duration(s: &Settings) -> Duration {
+    Duration::from_secs(s.cooldowns.feedback)
+}
 
 pub struct FeedbackCommand {
     data_dir: PathBuf,
@@ -19,10 +24,10 @@ pub struct FeedbackCommand {
 }
 
 impl FeedbackCommand {
-    pub fn new(data_dir: PathBuf, cooldown: Duration) -> Self {
+    pub fn new(data_dir: PathBuf, settings: SettingsHandle) -> Self {
         Self {
             data_dir,
-            cooldown: PerUserCooldown::fixed(cooldown),
+            cooldown: PerUserCooldown::live(settings, feedback_cooldown_duration),
         }
     }
 }

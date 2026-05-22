@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use eyre::Result;
 use twitch_irc::{login::LoginCredentials, transport::Transport};
@@ -5,6 +7,11 @@ use twitch_irc::{login::LoginCredentials, transport::Transport};
 use crate::aviation::AviationClient;
 use crate::commands::{Command, CommandContext};
 use crate::cooldown::PerUserCooldown;
+use crate::settings::{Settings, SettingsHandle};
+
+fn up_cooldown_duration(s: &Settings) -> Duration {
+    Duration::from_secs(s.cooldowns.up)
+}
 
 pub struct FlightsAboveCommand {
     aviation_client: Option<AviationClient>,
@@ -12,10 +19,10 @@ pub struct FlightsAboveCommand {
 }
 
 impl FlightsAboveCommand {
-    pub fn new(aviation_client: Option<AviationClient>, cooldown: std::time::Duration) -> Self {
+    pub fn new(aviation_client: Option<AviationClient>, settings: SettingsHandle) -> Self {
         Self {
             aviation_client,
-            cooldown: PerUserCooldown::fixed(cooldown),
+            cooldown: PerUserCooldown::live(settings, up_cooldown_duration),
         }
     }
 }
