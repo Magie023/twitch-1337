@@ -1,51 +1,320 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use eyre::{Result, WrapErr, bail};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info};
 
 const PINGS_FILENAME: &str = "pings.ron";
+const PING_ACTOR_CHANNEL: usize = 64;
 
-/// A single ping definition. The ping's name is the HashMap key in PingStore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ping {
     pub template: String,
     pub members: HashSet<String>,
     pub cooldown: Option<u64>,
     pub created_by: String,
-    /// Wall-clock timestamp of the most recent successful fire. Persisted
-    /// to disk so the dashboard can show "last fired" across restarts.
     #[serde(default)]
     pub last_fired_at: Option<DateTime<Utc>>,
-    /// Lifetime number of times this ping has fired. Persisted to disk.
     #[serde(default)]
     pub fire_count: u64,
 }
 
-/// Top-level container serialized to/from pings.ron.
+#[derive(Debug, Clone)]
+pub struct PingView {
+    pub name: String,
+    pub template: String,
+    pub members: HashSet<String>,
+    pub cooldown: Option<u64>,
+    pub created_by: String,
+    pub last_fired_at: Option<DateTime<Utc>>,
+    pub fire_count: u64,
+}
+
+impl PingView {
+    fn from_name_ping(name: &str, p: &Ping) -> Self {
+        Self {
+            name: name.to_owned(),
+            template: p.template.clone(),
+            members: p.members.clone(),
+            cooldown: p.cooldown,
+            created_by: p.created_by.clone(),
+            last_fired_at: p.last_fired_at,
+            fire_count: p.fire_count,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PingStore {
     pub pings: HashMap<String, Ping>,
 }
 
-/// Outcome of an atomic "check + record" trigger attempt.
 #[derive(Debug)]
 pub enum TriggerDecision {
-    /// Caller should silently do nothing: non-member, unknown ping, or no
-    /// mentionable members after excluding the sender.
     Skip,
-    /// Ping is still on cooldown; the remaining time is provided.
     OnCooldown(Duration),
-    /// Ping should be sent with the rendered template. The trigger timestamp
-    /// has already been recorded, so the caller just performs the send.
     Fire(String),
 }
 
-/// Reject control characters (CR/LF, NUL, etc.) that could split an IRC PRIVMSG
-/// into two commands or break framing when the template is interpolated.
+pub enum PingCommand {
+    CreatePing {
+        name: String,
+        template: String,
+        created_by: String,
+        cooldown: Option<u64>,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    DeletePing {
+        name: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    EditTemplate {
+        name: String,
+        template: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    AddMember {
+        ping_name: String,
+        username: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    RemoveMember {
+        ping_name: String,
+        username: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    TryRecordTrigger {
+        ping_name: String,
+        sender: String,
+        default_cooldown: Duration,
+        public: bool,
+        reply: oneshot::Sender<TriggerDecision>,
+    },
+    Snapshot {
+        reply: oneshot::Sender<Vec<PingView>>,
+    },
+    GetOne {
+        name: String,
+        reply: oneshot::Sender<Option<PingView>>,
+    },
+    ListForUser {
+        username: String,
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    IsMember {
+        ping_name: String,
+        username: String,
+        reply: oneshot::Sender<bool>,
+    },
+}
+
+#[derive(Clone)]
+pub struct PingHandle(Arc<mpsc::Sender<PingCommand>>);
+
+impl PingHandle {
+    pub fn new(tx: mpsc::Sender<PingCommand>) -> Self {
+        Self(Arc::new(tx))
+    }
+
+    async fn send<T>(&self, make_cmd: impl FnOnce(oneshot::Sender<T>) -> PingCommand) -> T {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.0.send(make_cmd(tx)).await;
+        rx.await.expect("ping actor dropped")
+    }
+
+    pub async fn create_ping(
+        &self,
+        name: String,
+        template: String,
+        created_by: String,
+        cooldown: Option<u64>,
+    ) -> Result<()> {
+        self.send(|reply| PingCommand::CreatePing {
+            name,
+            template,
+            created_by,
+            cooldown,
+            reply,
+        })
+        .await
+    }
+    pub async fn delete_ping(&self, name: String) -> Result<()> {
+        self.send(|reply| PingCommand::DeletePing { name, reply })
+            .await
+    }
+    pub async fn edit_template(&self, name: String, template: String) -> Result<()> {
+        self.send(|reply| PingCommand::EditTemplate {
+            name,
+            template,
+            reply,
+        })
+        .await
+    }
+    pub async fn add_member(&self, ping_name: String, username: String) -> Result<()> {
+        self.send(|reply| PingCommand::AddMember {
+            ping_name,
+            username,
+            reply,
+        })
+        .await
+    }
+    pub async fn remove_member(&self, ping_name: String, username: String) -> Result<()> {
+        self.send(|reply| PingCommand::RemoveMember {
+            ping_name,
+            username,
+            reply,
+        })
+        .await
+    }
+    pub async fn try_record_trigger(
+        &self,
+        ping_name: String,
+        sender: String,
+        default_cooldown: Duration,
+        public: bool,
+    ) -> TriggerDecision {
+        self.send(|reply| PingCommand::TryRecordTrigger {
+            ping_name,
+            sender,
+            default_cooldown,
+            public,
+            reply,
+        })
+        .await
+    }
+    pub async fn snapshot(&self) -> Vec<PingView> {
+        self.send(|reply| PingCommand::Snapshot { reply }).await
+    }
+    pub async fn get_one(&self, name: String) -> Option<PingView> {
+        self.send(|reply| PingCommand::GetOne { name, reply }).await
+    }
+    pub async fn list_for_user(&self, username: String) -> Vec<String> {
+        self.send(|reply| PingCommand::ListForUser { username, reply })
+            .await
+    }
+    pub async fn is_member(&self, ping_name: String, username: String) -> bool {
+        self.send(|reply| PingCommand::IsMember {
+            ping_name,
+            username,
+            reply,
+        })
+        .await
+    }
+}
+
+pub type PingActorChannel = (
+    Arc<mpsc::Sender<PingCommand>>,
+    mpsc::Receiver<PingCommand>,
+    watch::Sender<HashSet<String>>,
+    watch::Receiver<HashSet<String>>,
+);
+
+pub fn ping_actor_channel_full() -> PingActorChannel {
+    let (cmd_tx, cmd_rx) = mpsc::channel(PING_ACTOR_CHANNEL);
+    let (names_tx, names_rx) = watch::channel(HashSet::new());
+    (Arc::new(cmd_tx), cmd_rx, names_tx, names_rx)
+}
+
+pub async fn run_ping_actor(
+    mut cmd_rx: mpsc::Receiver<PingCommand>,
+    mut manager: PingManager,
+    names_tx: watch::Sender<HashSet<String>>,
+) {
+    publish_names(&manager, &names_tx);
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            PingCommand::CreatePing {
+                name,
+                template,
+                created_by,
+                cooldown,
+                reply,
+            } => {
+                let result = manager
+                    .create_ping(name, template, created_by, cooldown)
+                    .await;
+                let _ = reply.send(result);
+                publish_names(&manager, &names_tx);
+            }
+            PingCommand::DeletePing { name, reply } => {
+                let result = manager.delete_ping(&name).await;
+                let _ = reply.send(result);
+                publish_names(&manager, &names_tx);
+            }
+            PingCommand::EditTemplate {
+                name,
+                template,
+                reply,
+            } => {
+                let _ = reply.send(manager.edit_template(&name, template).await);
+            }
+            PingCommand::AddMember {
+                ping_name,
+                username,
+                reply,
+            } => {
+                let _ = reply.send(manager.add_member(&ping_name, &username).await);
+            }
+            PingCommand::RemoveMember {
+                ping_name,
+                username,
+                reply,
+            } => {
+                let _ = reply.send(manager.remove_member(&ping_name, &username).await);
+            }
+            PingCommand::TryRecordTrigger {
+                ping_name,
+                sender,
+                default_cooldown,
+                public,
+                reply,
+            } => {
+                let decision = manager
+                    .try_record_trigger(&ping_name, &sender, default_cooldown, public)
+                    .await;
+                let _ = reply.send(decision);
+            }
+            PingCommand::Snapshot { reply } => {
+                let views = manager
+                    .store
+                    .pings
+                    .iter()
+                    .map(|(n, p)| PingView::from_name_ping(n, p))
+                    .collect();
+                let _ = reply.send(views);
+            }
+            PingCommand::GetOne { name, reply } => {
+                let view = manager
+                    .store
+                    .pings
+                    .get(&name)
+                    .map(|p| PingView::from_name_ping(&name, p));
+                let _ = reply.send(view);
+            }
+            PingCommand::ListForUser { username, reply } => {
+                let _ = reply.send(manager.list_pings_for_user_owned(&username));
+            }
+            PingCommand::IsMember {
+                ping_name,
+                username,
+                reply,
+            } => {
+                let _ = reply.send(manager.is_member(&ping_name, &username));
+            }
+        }
+    }
+}
+
+fn publish_names(manager: &PingManager, tx: &watch::Sender<HashSet<String>>) {
+    let names: HashSet<String> = manager.store.pings.keys().cloned().collect();
+    let _ = tx.send(names);
+}
+
 fn validate_template(template: &str) -> Result<()> {
     if template.chars().any(char::is_control) {
         bail!("Template darf keine Steuerzeichen (z.B. Zeilenumbrüche) enthalten");
@@ -53,7 +322,6 @@ fn validate_template(template: &str) -> Result<()> {
     Ok(())
 }
 
-/// Manages ping state and persistence.
 pub struct PingManager {
     store: PingStore,
     last_triggered: HashMap<String, Instant>,
@@ -61,9 +329,6 @@ pub struct PingManager {
 }
 
 impl PingManager {
-    /// In-memory empty manager. Useful for tests that only need *a*
-    /// `PingManager` instance without touching disk. The `path` is a dummy
-    /// (`pings.ron` in cwd); callers must not invoke methods that persist.
     #[cfg(any(test, feature = "testing"))]
     pub fn empty() -> Self {
         Self {
@@ -75,13 +340,6 @@ impl PingManager {
         }
     }
 
-    /// Load pings from disk. Creates empty store if file doesn't exist.
-    ///
-    /// Templates are re-validated against `validate_template` after
-    /// deserialization so that entries that were written before the validator
-    /// existed, hand-edited on disk, or survived a partial atomic write cannot
-    /// smuggle CR/LF/NUL into outgoing PRIVMSGs. Failing entries are dropped
-    /// with a warning.
     pub fn load(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join(PINGS_FILENAME);
         let mut store: PingStore = if path.exists() {
@@ -93,23 +351,14 @@ impl PingManager {
                 pings: HashMap::new(),
             }
         };
-
-        store
-            .pings
-            .retain(|name, ping| match validate_template(&ping.template) {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(
-                        ping = %name,
-                        error = %e,
-                        "Dropping ping with invalid template on load",
-                    );
-                    false
-                }
-            });
-
+        store.pings.retain(|name, ping| match validate_template(&ping.template) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(ping = %name, error = %e, "Dropping ping with invalid template on load");
+                false
+            }
+        });
         info!(count = store.pings.len(), "Loaded pings");
-
         Ok(Self {
             store,
             last_triggered: HashMap::new(),
@@ -117,22 +366,22 @@ impl PingManager {
         })
     }
 
-    /// Write current state to disk using write+rename for atomicity.
-    fn save(&self) -> Result<()> {
-        crate::util::persist::atomic_save_ron(&self.store, &self.path)
+    async fn save(&self) -> Result<()> {
+        crate::util::persist::atomic_save_ron_async(&self.store, &self.path)
+            .await
             .wrap_err("Failed to save pings.ron")?;
         debug!("Saved pings to disk");
         Ok(())
     }
 
-    /// Create a new ping. Errors if name is invalid or already exists.
-    pub fn create_ping(
+    pub async fn create_ping(
         &mut self,
         name: String,
         template: String,
         created_by: String,
         cooldown: Option<u64>,
     ) -> Result<()> {
+        let name = name.to_ascii_lowercase();
         if name.is_empty() {
             bail!("Ping-Name darf nicht leer sein");
         }
@@ -157,20 +406,18 @@ impl PingManager {
                 fire_count: 0,
             },
         );
-        self.save()
+        self.save().await
     }
 
-    /// Delete a ping. Errors if it doesn't exist.
-    pub fn delete_ping(&mut self, name: &str) -> Result<()> {
+    pub async fn delete_ping(&mut self, name: &str) -> Result<()> {
         if self.store.pings.remove(name).is_none() {
             bail!("Ping \"{}\" gibt es nicht", name);
         }
         self.last_triggered.remove(name);
-        self.save()
+        self.save().await
     }
 
-    /// Edit a ping's template. Errors if ping doesn't exist.
-    pub fn edit_template(&mut self, name: &str, template: String) -> Result<()> {
+    pub async fn edit_template(&mut self, name: &str, template: String) -> Result<()> {
         validate_template(&template)?;
         let ping = self
             .store
@@ -178,11 +425,10 @@ impl PingManager {
             .get_mut(name)
             .ok_or_else(|| eyre::eyre!("Ping \"{}\" gibt es nicht", name))?;
         ping.template = template;
-        self.save()
+        self.save().await
     }
 
-    /// Add a member to a ping. Errors if ping doesn't exist or user already a member.
-    pub fn add_member(&mut self, ping_name: &str, username: &str) -> Result<()> {
+    pub async fn add_member(&mut self, ping_name: &str, username: &str) -> Result<()> {
         let ping = self
             .store
             .pings
@@ -192,11 +438,10 @@ impl PingManager {
         if !ping.members.insert(username_lower) {
             bail!("{} ist schon in \"{}\"", username, ping_name);
         }
-        self.save()
+        self.save().await
     }
 
-    /// Remove a member from a ping. Errors if ping doesn't exist or user not a member.
-    pub fn remove_member(&mut self, ping_name: &str, username: &str) -> Result<()> {
+    pub async fn remove_member(&mut self, ping_name: &str, username: &str) -> Result<()> {
         let ping = self
             .store
             .pings
@@ -206,30 +451,13 @@ impl PingManager {
         if !ping.members.remove(&username_lower) {
             bail!("{} ist nicht in \"{}\"", username, ping_name);
         }
-        self.save()
+        self.save().await
     }
 
-    /// Iterate `(name, ping)` pairs without exposing the internal HashMap.
-    /// Used by the web dashboard's CRUD list view.
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Ping)> {
-        self.store.pings.iter()
-    }
-
-    /// Look up a single ping by exact name. Used by the dashboard edit view.
     pub fn get(&self, name: &str) -> Option<&Ping> {
         self.store.pings.get(name)
     }
 
-    /// Check if any ping matches the given name case-insensitively.
-    /// Avoids heap allocation compared to `name.to_lowercase()` + `contains_key`.
-    pub fn ping_exists_ignore_case(&self, name: &str) -> bool {
-        self.store
-            .pings
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case(name))
-    }
-
-    /// Check if a user is a member of a ping.
     pub fn is_member(&self, ping_name: &str, username: &str) -> bool {
         self.store
             .pings
@@ -238,18 +466,15 @@ impl PingManager {
             .unwrap_or(false)
     }
 
-    /// List all ping names a user is subscribed to.
-    pub fn list_pings_for_user(&self, username: &str) -> Vec<&str> {
+    pub fn list_pings_for_user_owned(&self, username: &str) -> Vec<String> {
         self.store
             .pings
             .iter()
             .filter(|(_, p)| p.members.contains(username))
-            .map(|(name, _)| name.as_str())
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
-    /// Check if a ping is on cooldown. Returns `Some(remaining)` if on cooldown,
-    /// `None` if it can be triggered (or ping doesn't exist).
     pub fn remaining_cooldown(
         &self,
         ping_name: &str,
@@ -270,10 +495,7 @@ impl PingManager {
         }
     }
 
-    /// Record that a ping was triggered now. Bumps `fire_count`, stamps
-    /// `last_fired_at`, and persists. Cooldown uses the in-memory
-    /// `Instant` map separately so wall-clock skew can't backdate it.
-    pub fn record_trigger(&mut self, ping_name: &str) -> Result<()> {
+    pub async fn record_trigger(&mut self, ping_name: &str) -> Result<()> {
         let Some(ping) = self.store.pings.get_mut(ping_name) else {
             return Ok(());
         };
@@ -281,15 +503,10 @@ impl PingManager {
             .insert(ping_name.to_string(), Instant::now());
         ping.last_fired_at = Some(Utc::now());
         ping.fire_count = ping.fire_count.saturating_add(1);
-        self.save()
+        self.save().await
     }
 
-    /// Atomically check membership + cooldown, render the template, and
-    /// record the trigger timestamp — closing the window where two concurrent
-    /// triggers both pass the cooldown check.
-    ///
-    /// `public = true` mirrors `[pings].public` and lets non-members fire.
-    pub fn try_record_trigger(
+    pub async fn try_record_trigger(
         &mut self,
         ping_name: &str,
         sender: &str,
@@ -305,15 +522,12 @@ impl PingManager {
         let Some(rendered) = self.render_template(ping_name, sender) else {
             return TriggerDecision::Skip;
         };
-        if let Err(e) = self.record_trigger(ping_name) {
+        if let Err(e) = self.record_trigger(ping_name).await {
             tracing::warn!(ping = %ping_name, error = ?e, "Failed to persist fire stats");
         }
         TriggerDecision::Fire(rendered)
     }
 
-    /// Render a ping's template with placeholders replaced.
-    /// Returns None if ping doesn't exist or has no mentionable members
-    /// (i.e., all members are the sender).
     pub fn render_template(&self, ping_name: &str, sender: &str) -> Option<String> {
         let ping = self.store.pings.get(ping_name)?;
         let sender_in_template = ping.template.contains("{sender}");
@@ -349,7 +563,7 @@ mod tests {
         }
     }
 
-    fn test_manager(dir: &Path) -> PingManager {
+    async fn test_manager(dir: &Path) -> PingManager {
         let mut mgr = empty_manager(dir);
         mgr.create_ping(
             "test".into(),
@@ -357,209 +571,146 @@ mod tests {
             "admin".into(),
             None,
         )
+        .await
         .unwrap();
         mgr
     }
 
-    #[test]
-    fn edit_template_updates_template() {
+    #[tokio::test]
+    async fn edit_template_updates_template() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-
+        let mut mgr = test_manager(dir.path()).await;
         mgr.edit_template("test", "New template {mentions}".into())
+            .await
             .unwrap();
-
-        let ping = mgr.store.pings.get("test").unwrap();
-        assert_eq!(ping.template, "New template {mentions}");
+        assert_eq!(
+            mgr.store.pings.get("test").unwrap().template,
+            "New template {mentions}"
+        );
     }
 
-    #[test]
-    fn edit_template_preserves_members() {
+    #[tokio::test]
+    async fn edit_template_preserves_members() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-        mgr.add_member("test", "bob").unwrap();
-
+        let mut mgr = test_manager(dir.path()).await;
+        mgr.add_member("test", "alice").await.unwrap();
+        mgr.add_member("test", "bob").await.unwrap();
         mgr.edit_template("test", "Updated {mentions}".into())
+            .await
             .unwrap();
-
         let ping = mgr.store.pings.get("test").unwrap();
         assert!(ping.members.contains("alice"));
         assert!(ping.members.contains("bob"));
         assert_eq!(ping.members.len(), 2);
     }
 
-    #[test]
-    fn edit_template_nonexistent_ping_errors() {
+    #[tokio::test]
+    async fn edit_template_nonexistent_ping_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-
-        let result = mgr.edit_template("nope", "whatever".into());
+        let mut mgr = test_manager(dir.path()).await;
+        let result = mgr.edit_template("nope", "whatever".into()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("gibt es nicht"));
     }
 
-    #[test]
-    fn create_ping_rejects_newline_in_template() {
+    #[tokio::test]
+    async fn create_ping_rejects_newline_in_template() {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = empty_manager(dir.path());
-
-        let result = mgr.create_ping(
-            "bad".into(),
-            "Hey {mentions}\r\nPRIVMSG #other :pwned".into(),
-            "admin".into(),
-            None,
-        );
+        let result = mgr
+            .create_ping(
+                "bad".into(),
+                "Hey {mentions}\r\nPRIVMSG #other :pwned".into(),
+                "admin".into(),
+                None,
+            )
+            .await;
         assert!(result.is_err());
         assert!(!mgr.store.pings.contains_key("bad"));
     }
 
-    #[test]
-    fn edit_template_rejects_control_chars() {
+    #[tokio::test]
+    async fn edit_template_rejects_control_chars() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-
-        let result = mgr.edit_template("test", "Hey\x00injection".into());
+        let mut mgr = test_manager(dir.path()).await;
+        let result = mgr.edit_template("test", "Hey\x00injection".into()).await;
         assert!(result.is_err());
-        let ping = mgr.store.pings.get("test").unwrap();
-        assert_eq!(ping.template, "Hey {mentions}!");
+        assert_eq!(
+            mgr.store.pings.get("test").unwrap().template,
+            "Hey {mentions}!"
+        );
     }
 
     #[test]
     fn load_drops_pings_with_invalid_template_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PINGS_FILENAME);
-        // Hand-write a pings.ron containing one good and one CR/LF-bearing entry,
-        // simulating a file written before validate_template existed or
-        // hand-edited on disk.
         let raw = "(pings: {\n  \"good\": (template: \"Hey {mentions}!\", members: [], cooldown: None, created_by: \"admin\"),\n  \"bad\": (template: \"Hey {mentions}\\r\\nPRIVMSG #other :pwned\", members: [], cooldown: None, created_by: \"admin\"),\n})\n";
         std::fs::write(&path, raw).unwrap();
-
         let mgr = PingManager::load(dir.path()).unwrap();
         assert!(mgr.store.pings.contains_key("good"));
         assert!(
             !mgr.store.pings.contains_key("bad"),
-            "ping with control chars must be dropped on load",
+            "ping with control chars must be dropped on load"
         );
     }
 
-    #[test]
-    fn edit_template_persists_to_disk() {
+    #[tokio::test]
+    async fn edit_template_persists_to_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
+        let mut mgr = test_manager(dir.path()).await;
         mgr.edit_template("test", "Persisted {mentions}".into())
+            .await
             .unwrap();
-
-        // Reload from disk
         let mgr2 = PingManager::load(dir.path()).unwrap();
-        let ping = mgr2.store.pings.get("test").unwrap();
-        assert_eq!(ping.template, "Persisted {mentions}");
-    }
-
-    #[test]
-    fn render_template_includes_sender_when_no_sender_placeholder_two_members() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-        mgr.add_member("test", "bob").unwrap();
-
-        let result = mgr.render_template("test", "alice").unwrap();
-        assert!(result.contains("@bob"), "should mention bob");
-        assert!(
-            result.contains("@alice"),
-            "sender should appear when no {{sender}} in template"
+        assert_eq!(
+            mgr2.store.pings.get("test").unwrap().template,
+            "Persisted {mentions}"
         );
     }
 
-    #[test]
-    fn render_template_fires_when_sender_is_only_member_and_no_sender_in_template() {
+    #[tokio::test]
+    async fn remaining_cooldown_returns_none_when_never_triggered() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-
-        let result = mgr.render_template("test", "alice");
-        assert!(
-            result.is_some(),
-            "should not skip when sole member and template has no {{sender}}"
-        );
-    }
-
-    #[test]
-    fn render_template_sender_included_in_mentions_when_no_sender_placeholder() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-        mgr.add_member("test", "bob").unwrap();
-
-        let result = mgr.render_template("test", "alice").unwrap();
-        assert!(result.contains("@alice"), "sender should be in mentions");
-        assert!(result.contains("@bob"));
-    }
-
-    #[test]
-    fn render_template_prefixes_sender_with_at() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut mgr = empty_manager(dir.path());
-        mgr.create_ping(
-            "test".into(),
-            "{mentions} {sender}".into(),
-            "admin".into(),
-            None,
-        )
-        .unwrap();
-        mgr.add_member("test", "alice").unwrap();
-        mgr.add_member("test", "bob").unwrap();
-
-        let result = mgr.render_template("test", "alice").unwrap();
-        assert!(result.contains("@alice"), "sender should have @ prefix");
-    }
-
-    #[test]
-    fn remaining_cooldown_returns_none_when_never_triggered() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-
+        let mut mgr = test_manager(dir.path()).await;
+        mgr.add_member("test", "alice").await.unwrap();
         assert!(
             mgr.remaining_cooldown("test", Duration::from_secs(300))
                 .is_none()
         );
     }
 
-    #[test]
-    fn remaining_cooldown_returns_some_when_on_cooldown() {
+    #[tokio::test]
+    async fn remaining_cooldown_returns_some_when_on_cooldown() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-        mgr.record_trigger("test").unwrap();
-
+        let mut mgr = test_manager(dir.path()).await;
+        mgr.add_member("test", "alice").await.unwrap();
+        mgr.record_trigger("test").await.unwrap();
         let remaining = mgr.remaining_cooldown("test", Duration::from_secs(300));
         assert!(remaining.is_some());
         let secs = remaining.unwrap().as_secs();
         assert!(secs > 0 && secs <= 300, "expected 1..=300, got {secs}");
     }
 
-    #[test]
-    fn remaining_cooldown_returns_none_for_nonexistent_ping() {
+    #[tokio::test]
+    async fn remaining_cooldown_returns_none_for_nonexistent_ping() {
         let dir = tempfile::tempdir().unwrap();
         let mgr = empty_manager(dir.path());
-
         assert!(
             mgr.remaining_cooldown("nope", Duration::from_secs(300))
                 .is_none()
         );
     }
 
-    #[test]
-    fn try_record_trigger_is_atomic_across_consecutive_calls() {
+    #[tokio::test]
+    async fn try_record_trigger_is_atomic_across_consecutive_calls() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-        mgr.add_member("test", "bob").unwrap();
-
-        // First call: should fire and record the trigger.
-        // Template "Hey {mentions}!" has no {sender}, so bob appears in mentions too.
-        let first = mgr.try_record_trigger("test", "bob", Duration::from_secs(300), false);
+        let mut mgr = test_manager(dir.path()).await;
+        mgr.add_member("test", "alice").await.unwrap();
+        mgr.add_member("test", "bob").await.unwrap();
+        let first = mgr
+            .try_record_trigger("test", "bob", Duration::from_secs(300), false)
+            .await;
         match first {
             TriggerDecision::Fire(rendered) => {
                 assert!(rendered.contains("@alice"));
@@ -567,10 +718,9 @@ mod tests {
             }
             other => panic!("expected Fire on first call, got {other:?}"),
         }
-
-        // Second immediate call: cooldown must already be in effect because
-        // record_trigger ran under the same `&mut self` as the check.
-        let second = mgr.try_record_trigger("test", "bob", Duration::from_secs(300), false);
+        let second = mgr
+            .try_record_trigger("test", "bob", Duration::from_secs(300), false)
+            .await;
         match second {
             TriggerDecision::OnCooldown(remaining) => {
                 assert!(remaining.as_secs() <= 300);
@@ -579,57 +729,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn try_record_trigger_respects_membership() {
+    #[tokio::test]
+    async fn try_record_trigger_respects_membership() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-
-        // Non-member with public=false is rejected and must not consume the cooldown.
-        let decision = mgr.try_record_trigger("test", "stranger", Duration::from_secs(300), false);
+        let mut mgr = test_manager(dir.path()).await;
+        mgr.add_member("test", "alice").await.unwrap();
+        let decision = mgr
+            .try_record_trigger("test", "stranger", Duration::from_secs(300), false)
+            .await;
         assert!(matches!(decision, TriggerDecision::Skip));
-
-        // Alice is the sole member; template "Hey {mentions}!" has no {sender},
-        // so alice appears in mentions → Fire.
-        let decision = mgr.try_record_trigger("test", "alice", Duration::from_secs(300), false);
+        let decision = mgr
+            .try_record_trigger("test", "alice", Duration::from_secs(300), false)
+            .await;
         assert!(
             matches!(decision, TriggerDecision::Fire(_)),
             "sole member with no {{sender}} in template should fire, got {decision:?}"
         );
     }
 
-    #[test]
-    fn try_record_trigger_public_allows_non_members() {
+    #[tokio::test]
+    async fn try_record_trigger_public_allows_non_members() {
         let dir = tempfile::tempdir().unwrap();
-        let mut mgr = test_manager(dir.path());
-        mgr.add_member("test", "alice").unwrap();
-
-        let decision = mgr.try_record_trigger("test", "stranger", Duration::from_secs(300), true);
+        let mut mgr = test_manager(dir.path()).await;
+        mgr.add_member("test", "alice").await.unwrap();
+        let decision = mgr
+            .try_record_trigger("test", "stranger", Duration::from_secs(300), true)
+            .await;
         assert!(
             matches!(decision, TriggerDecision::Fire(_)),
             "public=true should allow non-members to fire, got {decision:?}"
         );
     }
 
-    #[test]
-    fn render_template_includes_sender_when_no_sender_placeholder() {
+    #[tokio::test]
+    async fn render_template_includes_sender_when_no_sender_placeholder() {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = empty_manager(dir.path());
         mgr.create_ping("grp".into(), "{mentions}".into(), "admin".into(), None)
+            .await
             .unwrap();
-        mgr.add_member("grp", "alice").unwrap();
-        mgr.add_member("grp", "bob").unwrap();
-
+        mgr.add_member("grp", "alice").await.unwrap();
+        mgr.add_member("grp", "bob").await.unwrap();
         let result = mgr.render_template("grp", "alice").unwrap();
-        assert!(
-            result.contains("@alice"),
-            "sender should be in mentions when template has no {{sender}}"
-        );
+        assert!(result.contains("@alice"));
         assert!(result.contains("@bob"));
     }
 
-    #[test]
-    fn render_template_excludes_sender_when_template_has_sender_placeholder() {
+    #[tokio::test]
+    async fn render_template_excludes_sender_when_template_has_sender_placeholder() {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = empty_manager(dir.path());
         mgr.create_ping(
@@ -638,36 +785,31 @@ mod tests {
             "admin".into(),
             None,
         )
+        .await
         .unwrap();
-        mgr.add_member("grp", "alice").unwrap();
-        mgr.add_member("grp", "bob").unwrap();
-
+        mgr.add_member("grp", "alice").await.unwrap();
+        mgr.add_member("grp", "bob").await.unwrap();
         let result = mgr.render_template("grp", "alice").unwrap();
-        assert!(
-            !result.contains("@alice @") && result.starts_with("@alice pinged"),
-            "sender should not be in mentions when already in {{sender}}: {result}"
-        );
+        assert!(!result.contains("@alice @") && result.starts_with("@alice pinged"));
         assert!(result.contains("@bob"));
     }
 
-    #[test]
-    fn render_template_fires_when_sender_is_sole_member_and_no_sender_placeholder() {
+    #[tokio::test]
+    async fn render_template_fires_when_sender_is_sole_member_and_no_sender_placeholder() {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = empty_manager(dir.path());
         mgr.create_ping("grp".into(), "{mentions}".into(), "admin".into(), None)
+            .await
             .unwrap();
-        mgr.add_member("grp", "alice").unwrap();
-
+        mgr.add_member("grp", "alice").await.unwrap();
         let result = mgr.render_template("grp", "alice");
-        assert!(
-            result.is_some(),
-            "should not skip when sender is only member and template has no {{sender}}"
-        );
+        assert!(result.is_some());
         assert!(result.unwrap().contains("@alice"));
     }
 
-    #[test]
-    fn render_template_skips_when_sender_is_sole_member_and_template_has_sender_placeholder() {
+    #[tokio::test]
+    async fn render_template_skips_when_sender_is_sole_member_and_template_has_sender_placeholder()
+    {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = empty_manager(dir.path());
         mgr.create_ping(
@@ -676,13 +818,10 @@ mod tests {
             "admin".into(),
             None,
         )
+        .await
         .unwrap();
-        mgr.add_member("grp", "alice").unwrap();
-
+        mgr.add_member("grp", "alice").await.unwrap();
         let result = mgr.render_template("grp", "alice");
-        assert!(
-            result.is_none(),
-            "should skip when sender is sole member and template uses {{sender}}"
-        );
+        assert!(result.is_none());
     }
 }

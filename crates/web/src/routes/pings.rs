@@ -20,7 +20,7 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 use tower_cookies::Cookies;
 use twitch_1337_core::commands::normalize_username;
-use twitch_1337_core::ping::PingManager;
+use twitch_1337_core::ping::PingView;
 
 use crate::auth::csrf;
 use crate::auth::session::Session;
@@ -97,14 +97,12 @@ struct FormTpl<'a> {
     member_error: Option<String>,
 }
 
-/// Snapshot a ping for the edit-form template: cloned template text + a
-/// sorted member list. Returns `None` when the ping doesn't exist so callers
-/// can map to a 4xx without re-borrowing the manager.
-fn ping_snapshot(mgr: &PingManager, name: &str) -> Option<(String, Vec<String>)> {
-    let p = mgr.get(name)?;
-    let mut members: Vec<String> = p.members.iter().cloned().collect();
+/// Snapshot a ping view for the edit-form template: cloned template text + a
+/// sorted member list.
+fn ping_view_to_snapshot(view: &PingView) -> (String, Vec<String>) {
+    let mut members: Vec<String> = view.members.iter().cloned().collect();
     members.sort();
-    Some((p.template.clone(), members))
+    (view.template.clone(), members)
 }
 
 async fn list(
@@ -112,27 +110,26 @@ async fn list(
     Extension(session): Extension<Session>,
     cookies: Cookies,
 ) -> Result<Response, WebError> {
-    let mgr = state.ping_manager.read().await;
+    let views = state.ping_actor.snapshot().await;
     let mut rows: Vec<RowView> = Vec::new();
     let mut unique_members: HashSet<&str> = HashSet::new();
     let mut custom_cooldowns: usize = 0;
-    for (name, ping) in mgr.iter() {
+    for view in &views {
         rows.push(RowView {
-            name: name.clone(),
-            template: ping.template.clone(),
-            members: ping.members.len(),
-            created_initial: initial_of(&ping.created_by),
-            created_by: ping.created_by.clone(),
+            name: view.name.clone(),
+            template: view.template.clone(),
+            members: view.members.len(),
+            created_initial: initial_of(&view.created_by),
+            created_by: view.created_by.clone(),
         });
-        for m in &ping.members {
+        for m in &view.members {
             unique_members.insert(m.as_str());
         }
-        if ping.cooldown.is_some() {
+        if view.cooldown.is_some() {
             custom_cooldowns += 1;
         }
     }
     let total_members = unique_members.len();
-    drop(mgr);
 
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     let total_pings = rows.len();
@@ -195,40 +192,16 @@ async fn create(
     let template = form.template;
     let csrf_hex = csrf::encode(&session.csrf_value);
 
-    let mut mgr = state.ping_manager.write().await;
-    if mgr.ping_exists_ignore_case(&name) {
-        tracing::info!(
-            target: "twitch_1337_web",
-            user_id = %session.user_id,
-            action = "ping_create",
-            target_name = %name,
-            result = "duplicate",
-        );
-        return render_with(
-            StatusCode::BAD_REQUEST,
-            &FormTpl {
-                is_new: true,
-                name: &name,
-                template_text: &template,
-                csrf: &csrf_hex,
-                error: Some(format!("ping `{name}` already exists")),
-                user_login: &session.user_login,
-                user_avatar_url: session.avatar_url.as_deref(),
-                current_page: crate::nav::PINGS,
-                is_mod: session.is_mod(),
-                is_broadcaster: session.is_broadcaster,
-                is_owner: matches!(session.role, crate::auth::Role::Owner),
-                members: Vec::new(),
-                member_error: None,
-            },
-        );
-    }
-    if let Err(e) = mgr.create_ping(
-        name.clone(),
-        template.clone(),
-        session.user_login.clone(),
-        None,
-    ) {
+    if let Err(e) = state
+        .ping_actor
+        .create_ping(
+            name.clone(),
+            template.clone(),
+            session.user_login.clone(),
+            None,
+        )
+        .await
+    {
         tracing::warn!(
             target: "twitch_1337_web",
             user_id = %session.user_id,
@@ -256,7 +229,6 @@ async fn create(
             },
         );
     }
-    drop(mgr);
 
     tracing::info!(
         target: "twitch_1337_web",
@@ -274,13 +246,15 @@ async fn edit_form(
     Extension(session): Extension<Session>,
     Path(name): Path<String>,
 ) -> Result<Response, WebError> {
-    let (template_text, members) = {
-        let mgr = state.ping_manager.read().await;
-        ping_snapshot(&mgr, &name).ok_or_else(|| WebError::Validation {
+    let view = state
+        .ping_actor
+        .get_one(name.clone())
+        .await
+        .ok_or_else(|| WebError::Validation {
             field: "name".into(),
             msg: format!("ping `{name}` does not exist"),
-        })?
-    };
+        })?;
+    let (template_text, members) = ping_view_to_snapshot(&view);
 
     let csrf_hex = csrf::encode(&session.csrf_value);
     render(&FormTpl {
@@ -320,8 +294,11 @@ async fn update(
     let csrf_hex = csrf::encode(&session.csrf_value);
     let template = form.template;
 
-    let mut mgr = state.ping_manager.write().await;
-    if let Err(e) = mgr.edit_template(&name, template.clone()) {
+    if let Err(e) = state
+        .ping_actor
+        .edit_template(name.clone(), template.clone())
+        .await
+    {
         tracing::warn!(
             target: "twitch_1337_web",
             user_id = %session.user_id,
@@ -330,8 +307,11 @@ async fn update(
             result = "validation",
             error = ?e,
         );
-        let members = ping_snapshot(&mgr, &name)
-            .map(|(_, m)| m)
+        let members = state
+            .ping_actor
+            .get_one(name.clone())
+            .await
+            .map(|v| ping_view_to_snapshot(&v).1)
             .unwrap_or_default();
         return render_with(
             StatusCode::BAD_REQUEST,
@@ -352,7 +332,6 @@ async fn update(
             },
         );
     }
-    drop(mgr);
 
     tracing::info!(
         target: "twitch_1337_web",
@@ -396,18 +375,25 @@ async fn add_member(
     let csrf_hex = csrf::encode(&session.csrf_value);
     let invalid_login = !is_valid_twitch_login(&username);
 
-    let mut mgr = state.ping_manager.write().await;
     let result = if invalid_login {
-        Err("username must be 1–25 chars: lowercase letters, digits, underscore".to_owned())
+        Err("username must be 1\u{2013}25 chars: lowercase letters, digits, underscore".to_owned())
     } else {
-        mgr.add_member(&name, &username).map_err(|e| e.to_string())
+        state
+            .ping_actor
+            .add_member(name.clone(), username.clone())
+            .await
+            .map_err(|e| e.to_string())
     };
-    let (template_text, members) =
-        ping_snapshot(&mgr, &name).ok_or_else(|| WebError::Validation {
+
+    let view = state
+        .ping_actor
+        .get_one(name.clone())
+        .await
+        .ok_or_else(|| WebError::Validation {
             field: "name".into(),
             msg: format!("ping `{name}` does not exist"),
         })?;
-    drop(mgr);
+    let (template_text, members) = ping_view_to_snapshot(&view);
 
     match result {
         Ok(()) => {
@@ -469,11 +455,12 @@ async fn remove_member(
         return Err(WebError::CsrfMismatch);
     }
 
-    let mut mgr = state.ping_manager.write().await;
     // Idempotent: missing ping or non-member is a no-op so the row swap
     // succeeds without flashing an error to the user.
-    let _ = mgr.remove_member(&name, &username);
-    drop(mgr);
+    let _ = state
+        .ping_actor
+        .remove_member(name.clone(), username.clone())
+        .await;
 
     tracing::info!(
         target: "twitch_1337_web",
@@ -502,11 +489,9 @@ async fn delete(
         return Err(WebError::CsrfMismatch);
     }
 
-    let mut mgr = state.ping_manager.write().await;
     // Idempotent: delete on a missing ping is a no-op. The HTMX row swap
-    // removes the visible row either way; double-clicks shouldn't 4xx.
-    let _ = mgr.delete_ping(&name);
-    drop(mgr);
+    // removes the visible row either way; double-clicks should not 4xx.
+    let _ = state.ping_actor.delete_ping(name.clone()).await;
 
     tracing::info!(
         target: "twitch_1337_web",

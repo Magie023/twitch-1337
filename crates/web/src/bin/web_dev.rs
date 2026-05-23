@@ -11,7 +11,7 @@
 //!   - `DATA_DIR`   default `./dev-data`
 //!   - `CHANNEL`    default `devchannel`  (cosmetic, breadcrumb only)
 //!
-//! Caveat: `PingManager` and `MemoryStore` use atomic tmp+rename to
+//! Caveat: The ping actor and `MemoryStore` use atomic tmp+rename to
 //! persist, so two processes against the same dir will not corrupt each
 //! other's writes — but a last-writer-wins race is real. Don't run this
 //! against the same dev-data the production bot is actively writing to
@@ -29,7 +29,7 @@ use eyre::{Result, WrapErr as _};
 use secrecy::SecretString;
 use tokio::sync::{Notify, RwLock};
 use twitch_1337_core::ai::memory::store::MemoryStore;
-use twitch_1337_core::ping::PingManager;
+use twitch_1337_core::ping::{PingHandle, PingManager, ping_actor_channel_full, run_ping_actor};
 use twitch_1337_core::{install_crypto_provider, install_tracing};
 use twitch_1337_web::auth::OAuthCtx;
 use twitch_1337_web::auth::session::SessionTable;
@@ -62,6 +62,9 @@ async fn main() -> Result<()> {
     );
 
     let pings = PingManager::load(&data_dir).wrap_err("load ping manager")?;
+    let (ping_actor_tx, ping_actor_rx, ping_names_tx, _ping_names_rx) = ping_actor_channel_full();
+    tokio::spawn(run_ping_actor(ping_actor_rx, pings, ping_names_tx));
+    let ping_actor = PingHandle::new((*ping_actor_tx).clone());
 
     let audit_log: Arc<dyn twitch_1337_core::settings::AuditLog> = Arc::new(
         twitch_1337_core::settings::FileAuditLog::new(data_dir.join("settings_audit.log")),
@@ -113,7 +116,7 @@ async fn main() -> Result<()> {
         viewer_allowlist: Arc::from(Vec::<String>::new().into_boxed_slice()),
         client_id: SecretString::new("dev-client-id".to_owned().into()),
         oauth,
-        ping_manager: Arc::new(RwLock::new(pings)),
+        ping_actor,
         memory_store,
         signed_key,
         leaderboard: Arc::new(RwLock::new(HashMap::new())),

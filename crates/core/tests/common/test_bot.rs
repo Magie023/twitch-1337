@@ -21,7 +21,9 @@ use twitch_1337::{
     PersonalBest, Services,
     aviation::AviationClient,
     config::{AiBootstrap, Configuration},
-    load_leaderboard, run_bot,
+    load_leaderboard,
+    ping::{PingHandle, ping_actor_channel_full},
+    run_bot,
     twitch::whisper::{self, WhisperError, WhisperSender},
 };
 use twitch_irc::login::StaticLoginCredentials;
@@ -228,9 +230,10 @@ impl TestBotBuilder {
 
         let irc_connected = Arc::new(AtomicBool::new(false));
 
-        let ping_manager = Arc::new(tokio::sync::RwLock::new(
-            twitch_1337::ping::PingManager::load(data_dir.path()).expect("load ping manager"),
-        ));
+        let ping_manager =
+            twitch_1337::ping::PingManager::load(data_dir.path()).expect("load ping manager");
+        let (ping_actor_tx, ping_actor_rx, ping_names_tx, ping_names_rx) =
+            ping_actor_channel_full();
 
         let audit = Arc::new(twitch_1337::settings::MemoryAuditLog::new());
         let (settings_store, settings_handle) =
@@ -265,7 +268,7 @@ impl TestBotBuilder {
             let state = build_test_web_state(
                 &self.config,
                 irc_connected.clone(),
-                ping_manager.clone(),
+                PingHandle::new((*ping_actor_tx).clone()),
                 memory_store.clone(),
                 settings_handle.clone(),
                 settings_store.clone(),
@@ -313,7 +316,11 @@ impl TestBotBuilder {
             emote_glossary_override: self.emote_glossary_override,
             irc_connected: irc_connected.clone(),
             web_spawner,
+            ping_actor_tx,
+            ping_actor_rx,
             ping_manager,
+            ping_names_tx,
+            ping_names_rx,
             memory_store,
             leaderboard: Arc::new(tokio::sync::RwLock::new(
                 load_leaderboard(data_dir.path()).await,
@@ -658,7 +665,7 @@ impl WhisperSender for FakeWhisperSender {
 fn build_test_web_state(
     config: &Configuration,
     irc_connected: Arc<AtomicBool>,
-    ping_manager: Arc<tokio::sync::RwLock<twitch_1337::ping::PingManager>>,
+    ping_actor: PingHandle,
     memory_store: twitch_1337::ai::memory::store::MemoryStore,
     settings: twitch_1337::settings::SettingsHandle,
     settings_store: Arc<twitch_1337::settings::SettingsStore>,
@@ -713,7 +720,7 @@ fn build_test_web_state(
         viewer_allowlist: Arc::from(Vec::<String>::new().into_boxed_slice()),
         client_id: secrecy::SecretString::new("test-client-id".to_owned().into()),
         oauth,
-        ping_manager,
+        ping_actor,
         memory_store,
         signed_key,
         leaderboard: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),

@@ -17,7 +17,7 @@ use crate::{
     ai::command::{GROK_ALIAS_TRIGGER, is_ai_trigger},
     aviation, commands,
     config::{AiBootstrap, SuspendConfig},
-    ping,
+    ping::{PingCommand, PingHandle},
     settings::SettingsHandle,
     suspend::SuspensionManager,
     twitch::{ChatSender, seventv::SevenTvEmoteProvider, whisper::WhisperSender},
@@ -36,7 +36,8 @@ pub struct CommandHandlerConfig<T: Transport, L: LoginCredentials> {
     /// Pre-built memory v2 bundle. `None` disables v2 memory for `!ai`.
     pub ai_memory_v2: Option<ai::command::AiMemoryV2>,
     pub leaderboard: Arc<tokio::sync::RwLock<HashMap<String, PersonalBest>>>,
-    pub ping_manager: Arc<tokio::sync::RwLock<ping::PingManager>>,
+    pub ping_actor_tx: tokio::sync::mpsc::Sender<PingCommand>,
+    pub ping_names_rx: tokio::sync::watch::Receiver<std::collections::HashSet<String>>,
     pub hidden_admin_ids: Vec<String>,
     pub settings: SettingsHandle,
     pub tracker_tx: Option<tokio::sync::mpsc::Sender<aviation::TrackerCommand>>,
@@ -73,7 +74,8 @@ where
         llm,
         ai_memory_v2,
         leaderboard,
-        ping_manager,
+        ping_actor_tx,
+        ping_names_rx,
         hidden_admin_ids,
         settings,
         tracker_tx,
@@ -90,6 +92,8 @@ where
         emote_provider,
         primary_history_tap,
     } = cfg;
+
+    let ping_handle = PingHandle::new(ping_actor_tx);
 
     // Snapshot of the dashboard-managed settings at startup. Reads below use
     // these values; Tasks 6+ make selected commands consume the handle live.
@@ -159,7 +163,7 @@ where
 
     let mut cmd_list: Vec<Box<dyn commands::Command<T, L>>> = vec![
         Box::new(commands::ping_admin::PingAdminCommand::new(
-            ping_manager.clone(),
+            ping_handle.clone(),
             hidden_admin_ids.clone(),
         )),
         Box::new(commands::suspend::SuspendCommand::new(
@@ -314,8 +318,9 @@ where
     // PingTriggerCommand must be last: it matches any !<name> that is a registered ping,
     // so built-in commands earlier in the list take priority and can't be shadowed.
     cmd_list.push(Box::new(commands::ping_trigger::PingTriggerCommand::new(
-        ping_manager,
+        ping_handle,
         settings.clone(),
+        ping_names_rx,
     )));
 
     let sender = ChatSender::new(client.clone());

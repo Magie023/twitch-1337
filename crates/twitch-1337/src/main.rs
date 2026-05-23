@@ -10,10 +10,14 @@ use secrecy::ExposeSecret as _;
 use tokio::sync::oneshot;
 use tracing::info;
 use twitch_1337_core::{
-    AuthenticatedLoginCredentials, PersonalBest, Services, ai::memory::store::MemoryStore,
+    AuthenticatedLoginCredentials, PersonalBest, Services,
+    ai::memory::store::MemoryStore,
     aviation, doener, ensure_data_dir, get_data_dir, install_crypto_provider, install_tracing,
-    llm_factory, load_configuration, load_leaderboard, ping::PingManager, run_bot,
-    setup_and_verify_twitch_client, twitch::whisper, util::clock::SystemClock,
+    llm_factory, load_configuration, load_leaderboard,
+    ping::{PingHandle, PingManager, ping_actor_channel_full},
+    run_bot, setup_and_verify_twitch_client,
+    twitch::whisper,
+    util::clock::SystemClock,
 };
 use twitch_1337_web::helix::{AccessTokenProvider, HelixClient as _, ReqwestHelixClient};
 use twitch_irc::login::LoginCredentials as _;
@@ -82,9 +86,9 @@ pub async fn main() -> Result<()> {
 
     let irc_connected = Arc::new(AtomicBool::new(false));
 
-    let ping_manager = Arc::new(tokio::sync::RwLock::new(
-        PingManager::load(&get_data_dir()).wrap_err("Failed to load ping manager")?,
-    ));
+    let ping_manager =
+        PingManager::load(&get_data_dir()).wrap_err("Failed to load ping manager")?;
+    let (ping_actor_tx, ping_actor_rx, ping_names_tx, ping_names_rx) = ping_actor_channel_full();
 
     // Dashboard-managed runtime settings. Opened here so the same Arc-backed
     // store can be shared with both the IRC handlers (via `Services.settings`)
@@ -153,7 +157,7 @@ pub async fn main() -> Result<()> {
                 &config,
                 credentials_for_web,
                 irc_connected.clone(),
-                ping_manager.clone(),
+                PingHandle::new((*ping_actor_tx).clone()),
                 memory_store.clone(),
                 leaderboard.clone(),
                 aviation_tracker_tx.clone(),
@@ -179,7 +183,11 @@ pub async fn main() -> Result<()> {
         emote_glossary_override: None,
         irc_connected,
         web_spawner,
+        ping_actor_tx,
+        ping_actor_rx,
         ping_manager,
+        ping_names_tx,
+        ping_names_rx,
         memory_store,
         leaderboard,
         aviation_tracker_tx,
@@ -207,7 +215,7 @@ async fn build_web_spawner(
     config: &twitch_1337::config::Configuration,
     credentials: AuthenticatedLoginCredentials,
     irc_connected: Arc<AtomicBool>,
-    ping_manager: Arc<tokio::sync::RwLock<PingManager>>,
+    ping_actor: PingHandle,
     memory_store: MemoryStore,
     leaderboard: Arc<tokio::sync::RwLock<HashMap<String, PersonalBest>>>,
     tracker_tx: Option<Arc<tokio::sync::mpsc::Sender<aviation::TrackerCommand>>>,
@@ -285,7 +293,7 @@ async fn build_web_spawner(
         viewer_allowlist: Arc::from(config.twitch.viewer_allowlist.clone().into_boxed_slice()),
         client_id: config.twitch.client_id.clone(),
         oauth,
-        ping_manager,
+        ping_actor,
         memory_store,
         signed_key,
         leaderboard,

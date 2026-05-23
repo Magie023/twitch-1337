@@ -17,7 +17,7 @@ use twitch_1337_core::ai::memory::store::MemoryStore;
 use twitch_1337_core::aviation::TrackerCommand;
 use twitch_1337_core::commands::leaderboard::PersonalBest;
 use twitch_1337_core::config::AiBootstrap;
-use twitch_1337_core::ping::PingManager;
+use twitch_1337_core::ping::PingHandle;
 
 use crate::auth::OAuthCtx;
 use crate::auth::session::SessionTable;
@@ -49,7 +49,7 @@ pub struct WebState {
     /// commands). Wrapped in a tokio `RwLock` because writes (create/edit/
     /// delete) persist to disk and must serialize against IRC handler
     /// triggers.
-    pub ping_manager: Arc<RwLock<PingManager>>,
+    pub ping_actor: PingHandle,
     /// Shared v2 memory store (same `Arc`-backed instance the bot's `!ai`
     /// turn / dreamer ritual writes through). Sharing the store keeps the
     /// per-path mutex map coherent — two independent stores against the

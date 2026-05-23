@@ -18,6 +18,7 @@ pub mod suspend;
 pub mod twitch;
 pub mod util;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -108,10 +109,19 @@ pub struct Services {
     /// expected to return a `JoinHandle` that resolves when the web task
     /// exits.
     pub web_spawner: Option<WebSpawner>,
-    /// Shared ping manager. Constructed by the bin so the same `Arc` can be
-    /// handed both to the IRC handler set (via `SpawnDeps`) and to
-    /// `WebState` (for the dashboard CRUD routes).
-    pub ping_manager: Arc<tokio::sync::RwLock<crate::ping::PingManager>>,
+    /// Sender half of the ping actor channel, wrapped in `Arc` so it can be
+    /// cheaply cloned into `WebState`. The matching receiver and watch pair
+    /// are consumed by `spawn_handlers` to start the ping-actor task.
+    pub ping_actor_tx: Arc<tokio::sync::mpsc::Sender<crate::ping::PingCommand>>,
+    /// Receiver half of the ping actor channel. Consumed exactly once by
+    /// `spawn_handlers`.
+    pub ping_actor_rx: tokio::sync::mpsc::Receiver<crate::ping::PingCommand>,
+    /// Owned `PingManager` loaded from disk. Transferred into the ping actor.
+    pub ping_manager: crate::ping::PingManager,
+    /// Watch sender for the live ping name set.
+    pub ping_names_tx: tokio::sync::watch::Sender<HashSet<String>>,
+    /// Watch receiver for the live ping name set.
+    pub ping_names_rx: tokio::sync::watch::Receiver<HashSet<String>>,
     /// Shared v2 memory store. Constructed by the bin so the bot's `!ai`
     /// turn / dreamer ritual and the dashboard memory editor write through
     /// the *same* per-path mutex map. Two independent stores against the
@@ -175,7 +185,11 @@ where
         emote_glossary_override,
         irc_connected,
         web_spawner,
+        ping_actor_tx,
+        ping_actor_rx,
         ping_manager,
+        ping_names_tx,
+        ping_names_rx,
         memory_store,
         leaderboard,
         aviation_tracker_tx,
@@ -183,8 +197,8 @@ where
         primary_history_tap,
     } = services;
 
-    // Clone the sender out of the Arc for SpawnDeps (which holds a plain mpsc::Sender).
-    // `tokio::sync::mpsc::Sender<T>` is `Clone`, so this is a cheap reference-count bump.
+    // Clone the sender out of the Arc for SpawnDeps.
+    let ping_actor_tx_inner = (*ping_actor_tx).clone();
     let aviation_tracker_tx_inner = aviation_tracker_tx.as_ref().map(|a| (**a).clone());
 
     let schedules_enabled = !config.schedules.is_empty();
@@ -241,7 +255,11 @@ where
         data_dir,
         doener,
         leaderboard,
+        ping_actor_tx: ping_actor_tx_inner,
+        ping_actor_rx,
         ping_manager,
+        ping_names_tx,
+        ping_names_rx,
         suspension_manager,
         llm,
         ai_memory_v2,
@@ -294,7 +312,12 @@ where
         TARGET_HOUR,
         TARGET_MINUTE - 1
     );
-    crate::twitch::handlers::spawn::await_shutdown(handlers, shutdown).await;
+    let ping_actor_handle =
+        crate::twitch::handlers::spawn::await_shutdown(handlers, shutdown).await;
+
+    // Drop the Arc<Sender> clone held in Services so detached tasks are the
+    // only remaining senders. The ping actor drains once all senders drop.
+    drop(ping_actor_tx);
 
     // After handler shutdown, drain the web task. The graceful shutdown future
     // is wired to the same `shutdown_notify` notified by `await_shutdown`, so
@@ -303,6 +326,18 @@ where
         && let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await
     {
         tracing::warn!(target: "twitch_1337_web", ?e, "Web task did not shut down within 5s");
+    }
+
+    // Best-effort drain: actor exits once all Arc<Sender> clones drop. A short
+    // timeout avoids blocking shutdown when a stray clone lingers; the runtime
+    // will clean up on exit.
+    if let Err(e) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), ping_actor_handle).await
+    {
+        tracing::debug!(
+            ?e,
+            "Ping actor did not drain within 500ms; runtime will clean up"
+        );
     }
 
     info!("Bot shutdown complete");

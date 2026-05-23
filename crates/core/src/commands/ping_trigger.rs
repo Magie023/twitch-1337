@@ -1,43 +1,43 @@
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use eyre::Result;
-use tokio::sync::RwLock;
+use tokio::sync::watch;
 use tracing::debug;
 use twitch_irc::{login::LoginCredentials, transport::Transport};
 
 use super::{Command, CommandContext};
 use crate::cooldown::format_cooldown_remaining;
-use crate::ping::{PingManager, TriggerDecision};
+use crate::ping::{PingHandle, TriggerDecision};
 
 pub struct PingTriggerCommand {
-    ping_manager: Arc<RwLock<PingManager>>,
+    ping: PingHandle,
     settings: crate::settings::SettingsHandle,
+    names: watch::Receiver<HashSet<String>>,
 }
 
 impl PingTriggerCommand {
     pub fn new(
-        ping_manager: Arc<RwLock<PingManager>>,
+        ping: PingHandle,
         settings: crate::settings::SettingsHandle,
+        names: watch::Receiver<HashSet<String>>,
     ) -> Self {
         Self {
-            ping_manager,
+            ping,
             settings,
+            names,
         }
     }
 
     fn current_cooldown(&self) -> Duration {
         Duration::from_secs(self.settings.load().pings.cooldown)
     }
-
     fn current_public(&self) -> bool {
         self.settings.load().pings.public
     }
 }
 
-/// Extract the ping name from a trigger word.
-/// Only accepts `!name` (case-insensitive).
 fn parse_ping_trigger(word: &str) -> Option<String> {
     let name = word.strip_prefix('!')?;
     if name.is_empty() {
@@ -53,7 +53,6 @@ where
     L: LoginCredentials,
 {
     fn name(&self) -> &str {
-        // Not used for matching -- matches() is overridden
         "!<ping>"
     }
 
@@ -61,36 +60,27 @@ where
         let Some(name) = word.strip_prefix('!') else {
             return false;
         };
-
         if name.is_empty() {
             return false;
         }
-
-        // Use try_read to avoid blocking the dispatcher on a write lock
-        let manager = match self.ping_manager.try_read() {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        // Case-insensitive check avoids the heap allocation of to_lowercase()
-        manager.ping_exists_ignore_case(name)
+        let names = self.names.borrow();
+        names.iter().any(|k| k.eq_ignore_ascii_case(name))
     }
 
     async fn execute(&self, ctx: CommandContext<'_, T, L>) -> Result<()> {
         let Some(ping_name) = parse_ping_trigger(ctx.trigger) else {
             return Ok(());
         };
-        let invoker = &ctx.privmsg.sender.login;
-
-        let decision = {
-            let mut manager = self.ping_manager.write().await;
-            manager.try_record_trigger(
-                &ping_name,
+        let invoker = ctx.privmsg.sender.login.clone();
+        let decision = self
+            .ping
+            .try_record_trigger(
+                ping_name.clone(),
                 invoker,
                 self.current_cooldown(),
                 self.current_public(),
             )
-        };
-
+            .await;
         let rendered = match decision {
             TriggerDecision::Skip => return Ok(()),
             TriggerDecision::OnCooldown(remaining) => {
@@ -108,30 +98,30 @@ where
             }
             TriggerDecision::Fire(rendered) => rendered,
         };
-
         ctx.sender
             .say(ctx.privmsg.channel_login.clone(), rendered)
             .await;
-
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod settings_live_tests {
+    use super::*;
+    use crate::ping::{PingManager, ping_actor_channel_full, run_ping_actor};
+    use crate::settings::Settings;
     use std::sync::Arc;
 
-    use super::*;
-    use crate::settings::Settings;
-
-    #[test]
-    fn reads_cooldown_and_public_from_handle_at_call_time() {
+    #[tokio::test]
+    async fn reads_cooldown_and_public_from_handle_at_call_time() {
         let initial = Settings::compiled_defaults();
         let handle: crate::settings::SettingsHandle =
             Arc::new(arc_swap::ArcSwap::from_pointee(initial));
-        let mgr = Arc::new(tokio::sync::RwLock::new(crate::ping::PingManager::empty()));
-        let cmd = PingTriggerCommand::new(mgr.clone(), handle.clone());
-        // Snapshot the values seen by the command before and after a swap.
+        let (tx, rx, names_tx, names_rx) = ping_actor_channel_full();
+        let mgr = PingManager::empty();
+        tokio::spawn(run_ping_actor(rx, mgr, names_tx));
+        let ping = crate::ping::PingHandle::new((*tx).clone());
+        let cmd = PingTriggerCommand::new(ping, handle.clone(), names_rx);
         let before_cooldown = cmd.current_cooldown();
         let before_public = cmd.current_public();
         let mut next = Settings::compiled_defaults();

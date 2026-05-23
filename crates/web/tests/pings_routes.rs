@@ -70,11 +70,11 @@ async fn body_string(res: axum::http::Response<Body>) -> String {
 #[tokio::test]
 async fn list_renders_existing_pings() {
     let (state, sid, csrf, _bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("team".into(), "Hey {mentions}".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("team".into(), "Hey {mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
     let app = build_router(state);
     let req = Request::builder()
         .uri("/pings")
@@ -115,9 +115,8 @@ async fn create_rejects_control_chars() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let mgr = state.ping_manager.read().await;
     assert!(
-        mgr.get("bad").is_none(),
+        state.ping_actor.get_one("bad".into()).await.is_none(),
         "control-char ping must not persist"
     );
 }
@@ -125,11 +124,11 @@ async fn create_rejects_control_chars() {
 #[tokio::test]
 async fn create_rejects_duplicate_name() {
     let (state, sid, csrf, bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("dup".into(), "x {mentions}".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("dup".into(), "x {mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
     let app = build_router(state.clone());
     // Case-insensitive dup check: try "DUP".
     let body = format!(
@@ -145,18 +144,21 @@ async fn create_rejects_duplicate_name() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let mgr = state.ping_manager.read().await;
-    assert_eq!(mgr.iter().count(), 1, "no second ping should be created");
+    assert_eq!(
+        state.ping_actor.snapshot().await.len(),
+        1,
+        "no second ping should be created"
+    );
 }
 
 #[tokio::test]
 async fn edit_round_trip() {
     let (state, sid, csrf, bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("team".into(), "Hey {mentions}".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("team".into(), "Hey {mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
 
     // GET edit form — must contain the existing template.
     let app = build_router(state.clone());
@@ -188,18 +190,18 @@ async fn edit_round_trip() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let mgr = state.ping_manager.read().await;
-    assert_eq!(mgr.get("team").unwrap().template, "Updated {mentions}");
+    let view = state.ping_actor.get_one("team".into()).await.unwrap();
+    assert_eq!(view.template, "Updated {mentions}");
 }
 
 #[tokio::test]
 async fn delete_via_htmx_header_succeeds() {
     let (state, sid, csrf, bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("doomed".into(), "{mentions}".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("doomed".into(), "{mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
     let app = build_router(state.clone());
     let req = Request::builder()
         .method("POST")
@@ -215,18 +217,20 @@ async fn delete_via_htmx_header_succeeds() {
         html, "",
         "delete returns empty body for HTMX outerHTML swap"
     );
-    let mgr = state.ping_manager.read().await;
-    assert!(mgr.get("doomed").is_none(), "delete must remove the ping");
+    assert!(
+        state.ping_actor.get_one("doomed".into()).await.is_none(),
+        "delete must remove the ping"
+    );
 }
 
 #[tokio::test]
 async fn delete_without_csrf_rejected() {
     let (state, sid, csrf, _bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("survives".into(), "{mentions}".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("survives".into(), "{mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
     let app = build_router(state.clone());
     let req = Request::builder()
         .method("POST")
@@ -237,9 +241,8 @@ async fn delete_without_csrf_rejected() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
-    let mgr = state.ping_manager.read().await;
     assert!(
-        mgr.get("survives").is_some(),
+        state.ping_actor.get_one("survives".into()).await.is_some(),
         "ping must persist when csrf header is absent",
     );
 }
@@ -247,11 +250,11 @@ async fn delete_without_csrf_rejected() {
 #[tokio::test]
 async fn create_duplicate_renders_form_with_error_and_user_draft() {
     let (state, sid, csrf, bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("foo".into(), "@user".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("foo".into(), "@user".into(), "admin".into(), None)
+        .await
+        .unwrap();
     let app = build_router(state);
     let body = format!(
         "_csrf={csrf}&name=foo&template=%40new-template-text",
@@ -272,7 +275,7 @@ async fn create_duplicate_renders_form_with_error_and_user_draft() {
         "user draft must round-trip into the form; got {html}"
     );
     assert!(
-        html.contains("already exists"),
+        html.contains("gibt es schon"),
         "error message must render; got {html}"
     );
     assert!(
@@ -284,11 +287,11 @@ async fn create_duplicate_renders_form_with_error_and_user_draft() {
 #[tokio::test]
 async fn update_invalid_template_renders_form_with_error() {
     let (state, sid, csrf, bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("team".into(), "Hey {mentions}".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("team".into(), "Hey {mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
     let app = build_router(state.clone());
     // Control-char templates are rejected by `PingManager::edit_template`.
     // %01 is SOH, which `validate_template` rejects so the form re-renders.
@@ -317,21 +320,29 @@ async fn update_invalid_template_renders_form_with_error() {
         html.contains("class=\"error\""),
         "error banner must render; got {html}"
     );
-    // Original template must NOT have been overwritten on disk.
-    let mgr = state.ping_manager.read().await;
-    assert_eq!(mgr.get("team").unwrap().template, "Hey {mentions}");
+    // Original template must NOT have been overwritten.
+    let view = state.ping_actor.get_one("team".into()).await.unwrap();
+    assert_eq!(view.template, "Hey {mentions}");
 }
 
 #[tokio::test]
 async fn edit_form_lists_members() {
     let (state, sid, csrf, _bare, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
-            .unwrap();
-        mgr.add_member("team", "alice").unwrap();
-        mgr.add_member("team", "bob").unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
+    state
+        .ping_actor
+        .add_member("team".into(), "alice".into())
+        .await
+        .unwrap();
+    state
+        .ping_actor
+        .add_member("team".into(), "bob".into())
+        .await
+        .unwrap();
     let app = build_router(state);
     let req = Request::builder()
         .uri("/pings/team")
@@ -352,11 +363,11 @@ async fn edit_form_lists_members() {
 #[tokio::test]
 async fn add_member_round_trip() {
     let (state, sid, csrf, bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
     let body = format!(
         "_csrf={csrf}&username=Alice",
         csrf = urlencoding::encode(&bare_csrf),
@@ -371,18 +382,23 @@ async fn add_member_round_trip() {
     let app = build_router(state.clone());
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let mgr = state.ping_manager.read().await;
-    assert!(mgr.is_member("team", "alice"), "alice lowercased + added");
+    assert!(
+        state
+            .ping_actor
+            .is_member("team".into(), "alice".into())
+            .await,
+        "alice lowercased + added"
+    );
 }
 
 #[tokio::test]
 async fn add_member_rejects_invalid_login() {
     let (state, sid, csrf, bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
     let body = format!(
         "_csrf={csrf}&username=bad+name%21",
         csrf = urlencoding::encode(&bare_csrf),
@@ -397,20 +413,23 @@ async fn add_member_rejects_invalid_login() {
     let app = build_router(state.clone());
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let mgr = state.ping_manager.read().await;
-    let m = mgr.get("team").unwrap();
-    assert!(m.members.is_empty(), "invalid username must not persist");
+    let view = state.ping_actor.get_one("team".into()).await.unwrap();
+    assert!(view.members.is_empty(), "invalid username must not persist");
 }
 
 #[tokio::test]
 async fn remove_member_via_htmx_header_succeeds() {
     let (state, sid, csrf, bare_csrf, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
-            .unwrap();
-        mgr.add_member("team", "alice").unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
+    state
+        .ping_actor
+        .add_member("team".into(), "alice".into())
+        .await
+        .unwrap();
     let req = Request::builder()
         .method("POST")
         .uri("/pings/team/members/alice/delete")
@@ -421,19 +440,28 @@ async fn remove_member_via_htmx_header_succeeds() {
     let app = build_router(state.clone());
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let mgr = state.ping_manager.read().await;
-    assert!(!mgr.is_member("team", "alice"));
+    assert!(
+        !state
+            .ping_actor
+            .is_member("team".into(), "alice".into())
+            .await,
+        "alice must be removed"
+    );
 }
 
 #[tokio::test]
 async fn remove_member_without_csrf_rejected() {
     let (state, sid, csrf, _bare, _td) = authed_setup().await;
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
-            .unwrap();
-        mgr.add_member("team", "alice").unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("team".into(), "{mentions}".into(), "admin".into(), None)
+        .await
+        .unwrap();
+    state
+        .ping_actor
+        .add_member("team".into(), "alice".into())
+        .await
+        .unwrap();
     let req = Request::builder()
         .method("POST")
         .uri("/pings/team/members/alice/delete")
@@ -443,8 +471,13 @@ async fn remove_member_without_csrf_rejected() {
     let app = build_router(state.clone());
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
-    let mgr = state.ping_manager.read().await;
-    assert!(mgr.is_member("team", "alice"), "must persist on rejection");
+    assert!(
+        state
+            .ping_actor
+            .is_member("team".into(), "alice".into())
+            .await,
+        "must persist on rejection"
+    );
 }
 
 #[tokio::test]
@@ -464,9 +497,8 @@ async fn create_rejects_bad_form_csrf() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
-    let mgr = state.ping_manager.read().await;
     assert!(
-        mgr.get("tampered").is_none(),
+        state.ping_actor.get_one("tampered".into()).await.is_none(),
         "ping must not persist with mismatched _csrf",
     );
 }
@@ -500,11 +532,11 @@ async fn viewer_pings_list_has_no_mutation_controls() {
     let (state, _td) = build_state_with_ping_dir(helix).await;
 
     // Seed a ping so the table renders rows, not the empty state.
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("alpha".into(), "{mentions}".into(), "creator".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("alpha".into(), "{mentions}".into(), "creator".into(), None)
+        .await
+        .unwrap();
 
     let (sid, csrf, _bare_csrf) =
         insert_session_as(&state, "42", "alice", twitch_1337_web::auth::Role::Viewer);
@@ -545,11 +577,11 @@ async fn mod_pings_list_shows_mutation_controls() {
     });
     let (state, _td) = build_state_with_ping_dir(helix).await;
 
-    {
-        let mut mgr = state.ping_manager.write().await;
-        mgr.create_ping("beta".into(), "{mentions}".into(), "creator".into(), None)
-            .unwrap();
-    }
+    state
+        .ping_actor
+        .create_ping("beta".into(), "{mentions}".into(), "creator".into(), None)
+        .await
+        .unwrap();
 
     let (sid, csrf, _bare_csrf) =
         insert_session_as(&state, user_id, "moduser", twitch_1337_web::auth::Role::Mod);

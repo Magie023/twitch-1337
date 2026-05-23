@@ -18,7 +18,7 @@ use secrecy::SecretString;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 use twitch_1337_core::ai::memory::store::MemoryStore;
-use twitch_1337_core::ping::PingManager;
+use twitch_1337_core::ping::{PingHandle, PingManager, ping_actor_channel_full, run_ping_actor};
 use twitch_1337_web::WebState;
 use twitch_1337_web::auth::OAuthCtx;
 use twitch_1337_web::auth::session::SessionTable;
@@ -159,7 +159,9 @@ async fn build_state_inner_keep_settings(
     let pings_dir = TempDir::new().expect("pings tempdir");
     let memory_dir = TempDir::new().expect("memory tempdir");
     let pings = PingManager::load(pings_dir.path()).expect("load empty ping manager");
-    let ping_manager = Arc::new(RwLock::new(pings));
+    let (ping_actor_tx, ping_actor_rx, ping_names_tx, _ping_names_rx) = ping_actor_channel_full();
+    tokio::spawn(run_ping_actor(ping_actor_rx, pings, ping_names_tx));
+    let ping_actor = PingHandle::new((*ping_actor_tx).clone());
     let sessions = Arc::new(SessionTable::new(Duration::from_secs(7200), clock.clone()));
     let oauth = Arc::new(
         OAuthCtx::new(
@@ -202,7 +204,7 @@ async fn build_state_inner_keep_settings(
         viewer_allowlist: Arc::from(Vec::<String>::new().into_boxed_slice()),
         client_id: SecretString::new("test-client-id".to_owned().into()),
         oauth,
-        ping_manager,
+        ping_actor,
         memory_store,
         signed_key,
         leaderboard: Arc::new(RwLock::new(HashMap::new())),

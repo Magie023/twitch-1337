@@ -16,7 +16,7 @@ use std::{
 
 use llm::LlmClient;
 use tokio::{
-    sync::{Notify, RwLock, broadcast, mpsc, oneshot},
+    sync::{Notify, RwLock, broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Duration, timeout},
 };
@@ -29,7 +29,8 @@ use crate::{
     ai,
     aviation::{self, AviationClient},
     config::Configuration,
-    database, ping,
+    database,
+    ping::{PingCommand, PingManager, run_ping_actor},
     suspend::SuspensionManager,
     twitch::{
         ChatSender,
@@ -55,6 +56,7 @@ pub(crate) struct HandlerSet {
     pub tracker_1337: JoinHandle<()>,
     pub generic_commands: JoinHandle<()>,
     pub flight_tracker: JoinHandle<()>,
+    pub ping_actor: JoinHandle<()>,
     pub config_watcher: Option<JoinHandle<()>>,
     pub scheduled_messages: Option<JoinHandle<()>>,
     /// Shared notify so consolidation/shutdown code can drain in-flight
@@ -75,8 +77,12 @@ pub(crate) struct SpawnDeps<T: Transport, L: LoginCredentials> {
     // 1337 tracker.
     pub leaderboard: Arc<RwLock<HashMap<String, PersonalBest>>>,
 
-    // Generic commands.
-    pub ping_manager: Arc<RwLock<ping::PingManager>>,
+    // Generic commands (ping actor).
+    pub ping_actor_tx: mpsc::Sender<PingCommand>,
+    pub ping_actor_rx: mpsc::Receiver<PingCommand>,
+    pub ping_manager: PingManager,
+    pub ping_names_tx: watch::Sender<std::collections::HashSet<String>>,
+    pub ping_names_rx: watch::Receiver<std::collections::HashSet<String>>,
     pub suspension_manager: Arc<SuspensionManager>,
     pub llm: Option<Arc<dyn LlmClient>>,
     pub ai_memory_v2: Option<ai::command::AiMemoryV2>,
@@ -126,7 +132,11 @@ where
         data_dir,
         doener,
         leaderboard,
+        ping_actor_tx,
+        ping_actor_rx,
         ping_manager,
+        ping_names_tx,
+        ping_names_rx,
         suspension_manager,
         llm,
         ai_memory_v2,
@@ -141,6 +151,8 @@ where
         settings,
         primary_history_tap,
     } = deps;
+
+    let ping_actor = tokio::spawn(run_ping_actor(ping_actor_rx, ping_manager, ping_names_tx));
 
     let schedules_enabled = !config.schedules.is_empty();
 
@@ -261,7 +273,8 @@ where
                 llm,
                 ai_memory_v2,
                 leaderboard,
-                ping_manager,
+                ping_actor_tx,
+                ping_names_rx,
                 hidden_admin_ids: config.twitch.hidden_admins.clone(),
                 settings: settings.clone(),
                 tracker_tx,
@@ -288,6 +301,7 @@ where
         tracker_1337,
         generic_commands,
         flight_tracker,
+        ping_actor,
         config_watcher,
         scheduled_messages,
         shutdown_notify,
@@ -304,13 +318,17 @@ where
 /// with `tokio::spawn(std::future::pending::<()>())` when absent so every
 /// `select!` arm is a real `JoinHandle<()>`. This mirrors the existing
 /// fallback used for `flight_tracker` when no aviation client is wired.
-pub(crate) async fn await_shutdown(handlers: HandlerSet, shutdown: oneshot::Receiver<()>) {
+pub(crate) async fn await_shutdown(
+    handlers: HandlerSet,
+    shutdown: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
     let HandlerSet {
         router,
         latency,
         tracker_1337,
         generic_commands,
         flight_tracker,
+        mut ping_actor,
         config_watcher,
         scheduled_messages,
         shutdown_notify,
@@ -338,6 +356,9 @@ pub(crate) async fn await_shutdown(handlers: HandlerSet, shutdown: oneshot::Rece
         result = generic_commands => { error!("Generic Command Handler exited unexpectedly: {result:?}"); }
         result = latency => { error!("Latency handler exited unexpectedly: {result:?}"); }
         result = flight_tracker => { error!("Flight tracker exited unexpectedly: {result:?}"); }
+        result = &mut ping_actor => { error!("Ping actor exited unexpectedly: {result:?}"); }
         result = &mut sched => { error!("Scheduled message handler exited unexpectedly: {result:?}"); }
     }
+
+    ping_actor
 }

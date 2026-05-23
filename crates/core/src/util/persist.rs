@@ -1,12 +1,9 @@
 //! Atomic file persistence helpers.
 //!
-//! Both helpers serialize to RON, write the destination with extension
-//! replaced by `ron.tmp`, then rename onto the target so concurrent readers
-//! see either the old or the new file but never a torn write. Callers should
-//! pass a path ending in `.ron`. Sync (`atomic_save_ron`) and async
-//! (`atomic_save_ron_async`) variants exist because some call-sites run
-//! inside sync constructors and others inside `async fn`s with `tokio::fs`
-//! already in scope. "Atomic" here means no torn reads; it does NOT imply
+//! Helpers serialize to RON, write the destination with extension replaced by
+//! `ron.tmp`, then rename onto the target so concurrent readers see either the
+//! old or the new file but never a torn write. Callers should pass a path
+//! ending in `.ron`. "Atomic" here means no torn reads; it does NOT imply
 //! crash-safety (no `fsync` is performed).
 
 use std::path::{Path, PathBuf};
@@ -47,25 +44,6 @@ pub type Result<T> = std::result::Result<T, AtomicPersistError>;
 fn serialize<T: Serialize>(value: &T) -> Result<String> {
     ron::ser::to_string_pretty(value, ron::ser::PrettyConfig::default())
         .map_err(AtomicPersistError::Serialization)
-}
-
-/// Synchronously serialize `value` as pretty RON and atomically write to `path`.
-pub fn atomic_save_ron<T: Serialize>(value: &T, path: &Path) -> Result<()> {
-    let tmp = path.with_extension("ron.tmp");
-    let data = serialize(value)?;
-
-    std::fs::write(&tmp, &data).map_err(|source| AtomicPersistError::WriteTmp {
-        path: tmp.clone(),
-        source,
-    })?;
-
-    std::fs::rename(&tmp, path).map_err(|source| AtomicPersistError::Rename {
-        from: tmp.clone(),
-        to: path.to_path_buf(),
-        source,
-    })?;
-
-    Ok(())
 }
 
 /// Async byte-level atomic write — does not require `Serialize`.
@@ -124,20 +102,6 @@ mod tests {
     struct Sample {
         a: u32,
         b: String,
-    }
-
-    #[test]
-    fn sync_writes_and_renames() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sample.ron");
-        let value = Sample {
-            a: 7,
-            b: "hi".into(),
-        };
-        atomic_save_ron(&value, &path).unwrap();
-        let loaded: Sample = ron::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(loaded, value);
-        assert!(!path.with_extension("ron.tmp").exists());
     }
 
     #[tokio::test]
