@@ -35,10 +35,6 @@ use super::irc_line::{
     reply_privmsg,
 };
 
-/// Serialize [`TestBotBuilder::spawn`] across tests: the fake Twitch transport uses a
-/// global duplex slot (`fake_transport`); parallel spawns would pair the wrong stream.
-static TEST_BOT_SPAWN_LOCK: Mutex<()> = Mutex::const_new(());
-
 pub struct TestBot {
     pub transport: TransportHandle,
     pub clock: Arc<FakeClock>,
@@ -172,8 +168,6 @@ impl TestBotBuilder {
     }
 
     pub async fn spawn(mut self) -> TestBot {
-        let _spawn_guard = TEST_BOT_SPAWN_LOCK.lock().await;
-
         let data_dir = TempDir::new().expect("tempdir");
 
         if let Some(entries) = &self.seeded_leaderboard {
