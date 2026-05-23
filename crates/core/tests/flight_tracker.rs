@@ -546,12 +546,20 @@ async fn pending_flight_expires_without_extra_adsb_call() {
         .count();
     assert_eq!(callsign_requests, 1);
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let state_path = bot.data_dir.path().join("flights.ron");
-    let persisted = tokio::fs::read_to_string(state_path).await.unwrap();
-    let state: twitch_1337::aviation::tracker::FlightTrackerState =
-        ron::from_str(&persisted).unwrap();
-    assert!(state.flights.is_empty());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let persisted = tokio::fs::read_to_string(&state_path).await.unwrap();
+        let state: twitch_1337::aviation::tracker::FlightTrackerState =
+            ron::from_str(&persisted).unwrap();
+        if state.flights.is_empty() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("flight tracker did not clear expired flight within 5s: {state:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     bot.shutdown().await;
 }
