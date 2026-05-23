@@ -149,6 +149,8 @@ where
             return Ok(());
         };
 
+        self.cooldown.record(user).await;
+
         let snap = self.settings.load();
         let model = snap.ai.connection.model.clone();
         let timeout = Duration::from_secs(snap.ai.connection.timeout);
@@ -175,27 +177,23 @@ where
 
         let result = tokio::time::timeout(timeout, self.llm_client.chat_completion(request)).await;
 
-        let (response, record_cooldown) = match result {
+        let response = match result {
             Ok(Ok(text)) => match format_haiku_for_chat(text.trim()) {
-                Some(haiku) => (haiku, true),
+                Some(haiku) => haiku,
                 None => {
                     error!("Haiku AI returned invalid format");
-                    (LLM_ERROR_MESSAGE.to_string(), false)
+                    LLM_ERROR_MESSAGE.to_string()
                 }
             },
             Ok(Err(e)) => {
                 error!(error = ?e, "Haiku AI execution failed");
-                (LLM_ERROR_MESSAGE.to_string(), false)
+                LLM_ERROR_MESSAGE.to_string()
             }
             Err(_) => {
                 error!("Haiku AI execution timed out");
-                (LLM_TIMEOUT_MESSAGE.to_string(), false)
+                LLM_TIMEOUT_MESSAGE.to_string()
             }
         };
-
-        if record_cooldown {
-            self.cooldown.record(user).await;
-        }
 
         ctx.sender.reply(ctx.privmsg, response).await;
 

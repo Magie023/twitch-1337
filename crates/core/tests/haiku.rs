@@ -214,7 +214,7 @@ async fn haiku_command_respects_cooldown() {
 }
 
 #[tokio::test]
-async fn haiku_command_llm_failure_does_not_apply_cooldown() {
+async fn haiku_command_llm_failure_applies_cooldown() {
     let mut bot = TestBotBuilder::new()
         .with_ai()
         .with_settings(|o| {
@@ -234,13 +234,15 @@ async fn haiku_command_llm_failure_does_not_apply_cooldown() {
         "expected error reply, got: {out}"
     );
 
-    bot.llm.push_chat("Retry / Works / Now");
     bot.send("alice", "!haiku").await;
     let out = bot.expect_reply(Duration::from_secs(2)).await;
-    assert_eq!(out, "Retry / Works / Now");
+    assert!(
+        out.contains("Bitte warte noch"),
+        "expected cooldown reply, got: {out}"
+    );
 
     let calls = bot.llm.chat_calls();
-    assert_eq!(calls.len(), 2, "retry should call LLM again");
+    assert_eq!(calls.len(), 1, "retry should not call LLM again");
 
     bot.shutdown().await;
 }
@@ -251,6 +253,7 @@ async fn haiku_command_rejects_invalid_model_output() {
         .with_ai()
         .with_settings(|o| {
             o.ai.history.length = Some(10);
+            o.cooldowns.news = Some(60);
         })
         .spawn()
         .await;
@@ -265,6 +268,21 @@ async fn haiku_command_rejects_invalid_model_output() {
     assert!(
         out.contains("schiefgelaufen"),
         "expected validation error, got: {out}"
+    );
+
+    bot.llm.push_chat("Retry / Works / Now");
+    bot.send("alice", "!haiku").await;
+    let out = bot.expect_reply(Duration::from_secs(2)).await;
+    assert!(
+        out.contains("Bitte warte noch"),
+        "expected cooldown reply, got: {out}"
+    );
+
+    let calls = bot.llm.chat_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "invalid model output should still consume cooldown"
     );
 
     bot.shutdown().await;
