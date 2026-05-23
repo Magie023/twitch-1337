@@ -282,14 +282,16 @@ fn is_valid_user_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
+const SLUG_VALIDATION_MSG: &str = "must be 1-64 chars, [a-zA-Z0-9._-], not `new`/`delete`, no `..`";
+
 /// `..` is the security-critical case: without it a `/memory/state/..` URL would
 /// reach `read_kind` and could escape `memories/state/` to leak SOUL.md or
 /// LORE.md via the state viewer.
-fn validate_slug(slug: &str) -> Result<(), WebError> {
-    validate_state_slug(slug).map_err(|_| WebError::Validation {
+fn slug_err() -> WebError {
+    WebError::Validation {
         field: "slug".into(),
-        msg: "must be 1-64 chars, [a-zA-Z0-9._-], not `new`/`delete`, no `..`".into(),
-    })
+        msg: SLUG_VALIDATION_MSG.into(),
+    }
 }
 
 async fn tree(
@@ -610,7 +612,7 @@ async fn view_state(
     Extension(session): Extension<Session>,
     Path(slug): Path<String>,
 ) -> Result<Response, WebError> {
-    validate_slug(&slug)?;
+    validate_state_slug(&slug).map_err(|_| slug_err())?;
     let title = format!("State / {slug}");
     let save_url = format!("/memory/state/{slug}");
     let delete_url = format!("/memory/state/{slug}/delete");
@@ -862,7 +864,7 @@ async fn save_state(
     Path(slug): Path<String>,
     axum::Form(form): axum::Form<SaveForm>,
 ) -> Result<Response, WebError> {
-    validate_slug(&slug)?;
+    validate_state_slug(&slug).map_err(|_| slug_err())?;
     let redirect = format!("/memory/state/{slug}");
     let delete_url = format!("/memory/state/{slug}/delete");
     let cap = state.memory_store.caps().state_bytes;
@@ -893,18 +895,11 @@ async fn create_state(
     let csrf_hex = csrf::encode(&session.csrf_value);
     let cap = state.memory_store.caps().state_bytes;
 
-    if let Err(e) = validate_slug(&form.slug) {
-        let msg = match e {
-            WebError::Validation { msg, .. } => msg,
-            // `validate_slug` only ever produces a `Validation` error; treat
-            // anything else as a programming bug rather than papering over
-            // it with a wrong user-facing message.
-            other => return Err(other),
-        };
+    if validate_state_slug(&form.slug).is_err() {
         return render_state_create(
             StatusCode::BAD_REQUEST,
             &form.body,
-            Some(msg),
+            Some(SLUG_VALIDATION_MSG.to_owned()),
             cap,
             &csrf_hex,
             &session.user_login,
@@ -1024,7 +1019,7 @@ async fn delete_state(
     if !csrf::verify(&form.csrf, &session.csrf_value) {
         return Err(WebError::CsrfMismatch);
     }
-    validate_slug(&slug)?;
+    validate_state_slug(&slug).map_err(|_| slug_err())?;
     state
         .memory_store
         .delete_state(&slug)
