@@ -1,0 +1,24 @@
+# Release configuration. See https://release-plz.dev/docs/config
+
+[workspace]
+# Branch name for the release PR, matches the repo's `<prefix>/<slug>` policy.
+pr_branch_prefix = "release/"
+# Not a published crate — use git tags as the source of truth and skip
+# `cargo publish` entirely.
+git_only = true
+# Dependabot owns dependency bumps; don't churn the release PR.
+dependencies_update = false
+# Cargo semver-checks is irrelevant for a binary workspace.
+semver_check = false
+# Disable per-package tags/releases — a single workspace tag is created below.
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+# Cut one tag + GitHub release for the whole workspace,
+# named after the binary crate.
+name = "twitch-1337"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
