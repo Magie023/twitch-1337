@@ -511,3 +511,145 @@ async fn reset_cooldowns_clears_section_overrides() {
         "reset must restore the compiled default",
     );
 }
+
+#[tokio::test]
+async fn dreamer_checkbox_absent_sets_enabled_false() {
+    // The dreamer card always renders (no *_card_visible pattern), so
+    // omitting ai_dreamer_enabled from the POST means "disabled".
+    install_crypto();
+    let (mut state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    state.owner_id = Some(Arc::from("123"));
+    let (sid, csrf_cookie, bare_csrf) = insert_session_as(&state, "123", "owner", Role::Owner);
+
+    let app = build_router(state.clone());
+    let defaults = state.settings_store.defaults().clone();
+    // Send the form without ai_dreamer_enabled.
+    let body = save_form_body(&bare_csrf, &defaults, &[]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(
+        !state.settings.load().ai.dreamer.enabled,
+        "missing ai_dreamer_enabled checkbox must set dreamer.enabled = false",
+    );
+}
+
+#[tokio::test]
+async fn emotes_card_include_global_absent_without_card_visible() {
+    // When ai_emotes_card_visible is not submitted (card not rendered),
+    // include_global override must be None — i.e. no change to the existing value.
+    install_crypto();
+    let (mut state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    state.owner_id = Some(Arc::from("123"));
+    let (sid, csrf_cookie, bare_csrf) = insert_session_as(&state, "123", "owner", Role::Owner);
+
+    // First, enable emotes so there's an existing include_global value to preserve.
+    let defaults = state.settings_store.defaults().clone();
+    let app = build_router(state.clone());
+    let body = save_form_body(
+        &bare_csrf,
+        &defaults,
+        &[
+            ("ai_emotes_card_visible", "1"),
+            ("ai_emotes_enabled", "1"),
+            ("ai_emotes_include_global", "1"),
+        ],
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let include_global_before = state
+        .settings
+        .load()
+        .ai
+        .emotes
+        .as_ref()
+        .map(|e| e.include_global);
+    assert_eq!(include_global_before, Some(true));
+
+    // Now submit a form without the card_visible marker: include_global must stay.
+    let app = build_router(state.clone());
+    let body = save_form_body(&bare_csrf, &defaults, &[]);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let include_global_after = state
+        .settings
+        .load()
+        .ai
+        .emotes
+        .as_ref()
+        .map(|e| e.include_global);
+    assert_eq!(
+        include_global_after,
+        Some(true),
+        "include_global must not change when card_visible was absent",
+    );
+}
+
+#[tokio::test]
+async fn media_size_malformed_string_is_ignored() {
+    // A malformed byte-size string (e.g. "not-a-size") must not crash the
+    // handler; the field parses to None so the previous value is preserved.
+    install_crypto();
+    let (mut state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    state.owner_id = Some(Arc::from("123"));
+    let (sid, csrf_cookie, bare_csrf) = insert_session_as(&state, "123", "owner", Role::Owner);
+
+    let defaults = state.settings_store.defaults().clone();
+    let app = build_router(state.clone());
+    // Submit a valid save first so we have a known max_image_size.
+    let body = save_form_body(
+        &bare_csrf,
+        &defaults,
+        &[("ai_media_max_image_size", "5 MB")],
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // Now submit a malformed size: handler must succeed (not 500).
+    let app = build_router(state.clone());
+    let body = save_form_body(
+        &bare_csrf,
+        &defaults,
+        &[("ai_media_max_image_size", "not-a-size")],
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert!(
+        res.status().is_redirection() || res.status().is_client_error(),
+        "malformed size must not cause a 500; got {}",
+        res.status(),
+    );
+}
