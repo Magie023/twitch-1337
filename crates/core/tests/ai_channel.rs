@@ -19,7 +19,7 @@ const AI_CHAN: &str = "ai_chan";
 async fn ai_command_works_in_ai_channel() {
     let mut bot = TestBotBuilder::new()
         .with_ai()
-        .with_config(|c| c.twitch.ai_channel = Some(AI_CHAN.into()))
+        .with_settings(|o| o.twitch.ai_channel = Some(Some(AI_CHAN.into())))
         .spawn()
         .await;
 
@@ -36,7 +36,7 @@ async fn ai_command_works_in_ai_channel() {
 #[tokio::test]
 async fn lb_is_ignored_in_ai_channel() {
     let mut bot = TestBotBuilder::new()
-        .with_config(|c| c.twitch.ai_channel = Some(AI_CHAN.into()))
+        .with_settings(|o| o.twitch.ai_channel = Some(Some(AI_CHAN.into())))
         .spawn()
         .await;
 
@@ -49,7 +49,7 @@ async fn lb_is_ignored_in_ai_channel() {
 #[tokio::test]
 async fn ping_is_ignored_in_ai_channel() {
     let mut bot = TestBotBuilder::new()
-        .with_config(|c| c.twitch.ai_channel = Some(AI_CHAN.into()))
+        .with_settings(|o| o.twitch.ai_channel = Some(Some(AI_CHAN.into())))
         .spawn()
         .await;
 
@@ -62,7 +62,7 @@ async fn ping_is_ignored_in_ai_channel() {
 #[tokio::test]
 async fn track_is_ignored_in_ai_channel() {
     let mut bot = TestBotBuilder::new()
-        .with_config(|c| c.twitch.ai_channel = Some(AI_CHAN.into()))
+        .with_settings(|o| o.twitch.ai_channel = Some(Some(AI_CHAN.into())))
         .spawn()
         .await;
 
@@ -75,7 +75,7 @@ async fn track_is_ignored_in_ai_channel() {
 #[tokio::test]
 async fn aviation_lookup_is_ignored_in_ai_channel() {
     let mut bot = TestBotBuilder::new()
-        .with_config(|c| c.twitch.ai_channel = Some(AI_CHAN.into()))
+        .with_settings(|o| o.twitch.ai_channel = Some(Some(AI_CHAN.into())))
         .spawn()
         .await;
 
@@ -88,7 +88,7 @@ async fn aviation_lookup_is_ignored_in_ai_channel() {
 #[tokio::test]
 async fn feedback_is_ignored_in_ai_channel() {
     let mut bot = TestBotBuilder::new()
-        .with_config(|c| c.twitch.ai_channel = Some(AI_CHAN.into()))
+        .with_settings(|o| o.twitch.ai_channel = Some(Some(AI_CHAN.into())))
         .spawn()
         .await;
 
@@ -110,7 +110,7 @@ async fn tracker_1337_ignores_ai_channel_messages() {
 
     let bot = TestBotBuilder::new()
         .at(at_1337)
-        .with_config(|c| c.twitch.ai_channel = Some(AI_CHAN.into()))
+        .with_settings(|o| o.twitch.ai_channel = Some(Some(AI_CHAN.into())))
         .spawn()
         .await;
 
@@ -133,7 +133,7 @@ async fn tracker_1337_ignores_ai_channel_messages() {
 async fn ai_command_still_works_in_primary_channel() {
     let mut bot = TestBotBuilder::new()
         .with_ai()
-        .with_config(|c| c.twitch.ai_channel = Some(AI_CHAN.into()))
+        .with_settings(|o| o.twitch.ai_channel = Some(Some(AI_CHAN.into())))
         .spawn()
         .await;
 

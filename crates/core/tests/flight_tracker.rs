@@ -6,17 +6,21 @@ use std::time::Duration;
 use chrono::Duration as ChronoDuration;
 use common::TestBotBuilder;
 use secrecy::SecretString;
-use twitch_1337::config::AviationstackConfig;
+use twitch_1337::config::AviationstackBootstrap;
+use twitch_1337::settings::overrides::SettingsOverrides;
 use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
 fn enable_aviationstack(config: &mut twitch_1337::config::Configuration) {
-    config.aviationstack = Some(AviationstackConfig {
-        enabled: true,
+    // Only the secret api_key lives in the bootstrap config; enabled/base_url/
+    // timeout_secs are runtime settings that the test supplies via overrides.
+    config.aviationstack = Some(AviationstackBootstrap {
         api_key: SecretString::new("test-key".into()),
-        base_url: "https://api.aviationstack.com/v1".to_string(),
-        timeout_secs: 5,
     });
+}
+
+fn set_aviationstack_enabled(o: &mut SettingsOverrides) {
+    o.aviationstack.enabled = Some(true);
 }
 
 #[tokio::test]
@@ -71,6 +75,7 @@ async fn track_command_acknowledges_flight() {
 async fn track_command_enriches_flight_from_aviationstack_once() {
     let bot = TestBotBuilder::new()
         .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
         .spawn()
         .await;
 
@@ -172,6 +177,7 @@ async fn track_command_enriches_flight_from_aviationstack_once() {
 async fn track_command_accepts_aviationstack_flight_before_adsb_appears() {
     let bot = TestBotBuilder::new()
         .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
         .spawn()
         .await;
 
@@ -283,6 +289,7 @@ async fn track_command_accepts_aviationstack_flight_before_adsb_appears() {
 async fn track_command_keeps_pending_flight_with_stale_scheduled_departure() {
     let bot = TestBotBuilder::new()
         .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
         .spawn()
         .await;
 
@@ -383,6 +390,7 @@ async fn track_command_keeps_pending_flight_with_stale_scheduled_departure() {
 async fn pending_flight_polls_when_due_and_becomes_visible() {
     let bot = TestBotBuilder::new()
         .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
         .spawn()
         .await;
 
@@ -483,6 +491,7 @@ async fn pending_flight_polls_when_due_and_becomes_visible() {
 async fn pending_flight_expires_without_extra_adsb_call() {
     let bot = TestBotBuilder::new()
         .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
         .spawn()
         .await;
 

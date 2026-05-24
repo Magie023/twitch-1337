@@ -19,6 +19,7 @@ csv = { workspace = true }
 eyre = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
+humantime = "2"
 humantime-serde = { workspace = true }
 infer = { workspace = true }
 llm = { path = "../llm" }

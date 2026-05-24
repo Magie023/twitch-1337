@@ -183,11 +183,14 @@ impl TestBotBuilder {
             MockServer::start(),
             MockServer::start()
         );
-        if let Some(aviationstack) = self.config.aviationstack.as_mut()
-            && aviationstack.enabled
-            && aviationstack.base_url == "https://api.aviationstack.com/v1"
+        // When the test enables aviationstack via settings overrides and uses the
+        // default base_url, redirect to the mock server so tests don't hit the
+        // real API.
+        if let Some(ref mut o) = self.settings_overrides
+            && o.aviationstack.enabled == Some(true)
+            && o.aviationstack.base_url.is_none()
         {
-            aviationstack.base_url = adsb_mock.uri();
+            o.aviationstack.base_url = Some(adsb_mock.uri());
         }
         // If the test enabled emotes via settings overrides but hasn't set a
         // base_url, redirect the 7TV API call to the wiremock server.
@@ -219,25 +222,12 @@ impl TestBotBuilder {
         client.join(channel.clone()).expect("join");
 
         twitch_1337::install_crypto_provider();
-        let http = reqwest::Client::new();
-        let aviation = AviationClient::new_with_base_url(
-            adsb_mock.uri(),
-            adsb_mock.uri(),      // adsbdb shares the same mock server in tests
-            nominatim_mock.uri(), // nominatim
-            http,
-        )
-        .with_aviationstack_config(self.config.aviationstack.clone());
 
-        let irc_connected = Arc::new(AtomicBool::new(false));
-
-        let ping_manager =
-            twitch_1337::ping::PingManager::load(data_dir.path()).expect("load ping manager");
-        let (ping_actor_tx, ping_actor_rx, ping_names_tx, ping_names_rx) =
-            ping_actor_channel_full();
-
+        // Open settings first so we can read runtime values (e.g. aviationstack)
+        // before constructing the aviation client.
         let audit = Arc::new(twitch_1337::settings::MemoryAuditLog::new());
         let (settings_store, settings_handle) =
-            twitch_1337::settings::SettingsStore::open(data_dir.path(), audit)
+            twitch_1337::settings::SettingsStore::open(data_dir.path(), audit, "test_chan")
                 .expect("open settings");
         if let Some(o) = self.settings_overrides.take() {
             let actor = twitch_1337::settings::Actor {
@@ -249,6 +239,30 @@ impl TestBotBuilder {
                 .await
                 .expect("apply test overrides");
         }
+
+        let http = reqwest::Client::new();
+        let av_settings = settings_handle.load().aviationstack.clone();
+        let aviation = AviationClient::new_with_base_url(
+            adsb_mock.uri(),
+            adsb_mock.uri(),      // adsbdb shares the same mock server in tests
+            nominatim_mock.uri(), // nominatim
+            http,
+        )
+        .with_aviationstack(
+            self.config
+                .aviationstack
+                .as_ref()
+                .map(|b| b.api_key.clone()),
+            av_settings.base_url.clone(),
+            av_settings.timeout_secs,
+        );
+
+        let irc_connected = Arc::new(AtomicBool::new(false));
+
+        let ping_manager =
+            twitch_1337::ping::PingManager::load(data_dir.path()).expect("load ping manager");
+        let (ping_actor_tx, ping_actor_rx, ping_names_tx, ping_names_rx) =
+            ping_actor_channel_full();
 
         let memory_store = twitch_1337::ai::memory::store::MemoryStore::open(
             data_dir.path(),
@@ -691,7 +705,7 @@ fn build_test_web_state(
     }
 
     let web_clock = Arc::new(WebSystemClock);
-    let sessions = Arc::new(SessionTable::new(config.web.session_ttl, web_clock.clone()));
+    let sessions = Arc::new(SessionTable::new(web_clock.clone()));
     let oauth = Arc::new(
         OAuthCtx::new(
             "test-client-id",
@@ -704,8 +718,6 @@ fn build_test_web_state(
         bind_addr: config.web.bind_addr.clone(),
         public_url: config.web.public_url.clone(),
         session_secret: config.web.session_secret.clone(),
-        session_ttl: config.web.session_ttl,
-        role_check_refresh: config.web.mod_check_refresh,
     });
     let signed_key = tower_cookies::Key::from(&[0x42u8; 64]);
     twitch_1337_web::WebState {
@@ -716,8 +728,6 @@ fn build_test_web_state(
         clock: web_clock,
         channel: Arc::from(config.twitch.channel.as_str()),
         broadcaster_id: Arc::from("0"),
-        hidden_admins: Arc::from(Vec::<String>::new().into_boxed_slice()),
-        viewer_allowlist: Arc::from(Vec::<String>::new().into_boxed_slice()),
         client_id: secrecy::SecretString::new("test-client-id".to_owned().into()),
         oauth,
         ping_actor,
@@ -728,7 +738,7 @@ fn build_test_web_state(
         avatar_cache: Arc::new(twitch_1337_web::helix::AvatarCache::new(
             std::time::Duration::from_secs(3600),
         )),
-        owner_id: None,
+        owner: Arc::new(arc_swap::ArcSwap::from_pointee(config.twitch.owner.clone())),
         settings,
         settings_store,
         ai_bootstrap: None,

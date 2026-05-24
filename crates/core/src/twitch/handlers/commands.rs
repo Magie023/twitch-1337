@@ -16,7 +16,7 @@ use crate::{
     ai::chat_history::{ai_channel_history_capacity, primary_history_capacity},
     ai::command::{GROK_ALIAS_TRIGGER, is_ai_trigger},
     aviation, commands,
-    config::{AiBootstrap, SuspendConfig},
+    config::AiBootstrap,
     ping::{PingCommand, PingHandle},
     settings::SettingsHandle,
     suspend::SuspensionManager,
@@ -38,7 +38,6 @@ pub struct CommandHandlerConfig<T: Transport, L: LoginCredentials> {
     pub leaderboard: Arc<tokio::sync::RwLock<HashMap<String, PersonalBest>>>,
     pub ping_actor_tx: tokio::sync::mpsc::Sender<PingCommand>,
     pub ping_names_rx: tokio::sync::watch::Receiver<std::collections::HashSet<String>>,
-    pub hidden_admin_ids: Vec<String>,
     pub settings: SettingsHandle,
     pub tracker_tx: Option<tokio::sync::mpsc::Sender<aviation::TrackerCommand>>,
     pub aviation_client: Option<aviation::AviationClient>,
@@ -50,7 +49,6 @@ pub struct CommandHandlerConfig<T: Transport, L: LoginCredentials> {
     pub data_dir: std::path::PathBuf,
     pub doener: Arc<crate::doener::DoeneratlasClient>,
     pub suspension_manager: Arc<SuspensionManager>,
-    pub suspend: SuspendConfig,
     /// Pre-built 7TV emote provider. `None` disables emote grounding for `!ai`.
     pub emote_provider: Option<Arc<SevenTvEmoteProvider>>,
     /// Optional test-only sink: when set, the freshly built primary
@@ -76,7 +74,6 @@ where
         leaderboard,
         ping_actor_tx,
         ping_names_rx,
-        hidden_admin_ids,
         settings,
         tracker_tx,
         aviation_client,
@@ -88,7 +85,6 @@ where
         data_dir,
         doener,
         suspension_manager,
-        suspend,
         emote_provider,
         primary_history_tap,
     } = cfg;
@@ -98,8 +94,6 @@ where
     // Snapshot of the dashboard-managed settings at startup. Reads below use
     // these values; Tasks 6+ make selected commands consume the handle live.
     let snapshot = settings.load_full();
-
-    let default_suspend_duration = Duration::from_secs(suspend.default_duration_secs);
 
     let broadcast_rx = broadcast_tx.subscribe();
 
@@ -164,16 +158,15 @@ where
     let mut cmd_list: Vec<Box<dyn commands::Command<T, L>>> = vec![
         Box::new(commands::ping_admin::PingAdminCommand::new(
             ping_handle.clone(),
-            hidden_admin_ids.clone(),
+            settings.clone(),
         )),
         Box::new(commands::suspend::SuspendCommand::new(
             suspension_manager.clone(),
-            hidden_admin_ids.clone(),
-            default_suspend_duration,
+            settings.clone(),
         )),
         Box::new(commands::suspend::UnsuspendCommand::new(
             suspension_manager.clone(),
-            hidden_admin_ids,
+            settings.clone(),
         )),
         Box::new(aviation::commands::random_flight::RandomFlightCommand),
         Box::new(aviation::commands::flights_above::FlightsAboveCommand::new(

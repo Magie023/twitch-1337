@@ -17,7 +17,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::routing::get;
 use helpers::{
     FakeHelix, build_state_with_dirs, build_state_with_overrides, cookie_header, insert_session_as,
-    install_crypto,
+    install_crypto, set_owner,
 };
 use tower::ServiceExt as _;
 use twitch_1337_web::WebState;
@@ -48,8 +48,8 @@ fn owner_app(state: WebState) -> Router {
 #[tokio::test]
 async fn owner_session_admitted_by_require_owner() {
     install_crypto();
-    let (mut state, _td_p, _td_m) = build_state_with_dirs(empty_helix()).await;
-    state.owner_id = Some(Arc::from("42"));
+    let (state, _td_p, _td_m) = build_state_with_dirs(empty_helix()).await;
+    set_owner(&state, Some("42"));
 
     let (sid, csrf, _bare) = insert_session_as(&state, "42", "alice", Role::Owner);
     let cookie = cookie_header(&sid, &csrf);
@@ -76,8 +76,8 @@ async fn owner_session_admitted_by_require_owner() {
 #[tokio::test]
 async fn mod_session_rejected_by_require_owner() {
     install_crypto();
-    let (mut state, _td_p, _td_m) = build_state_with_dirs(empty_helix()).await;
-    state.owner_id = Some(Arc::from("99"));
+    let (state, _td_p, _td_m) = build_state_with_dirs(empty_helix()).await;
+    set_owner(&state, Some("99"));
 
     let (sid, csrf, _bare) = insert_session_as(&state, "42", "bob", Role::Mod);
     let cookie = cookie_header(&sid, &csrf);
@@ -105,9 +105,9 @@ async fn mod_session_rejected_by_require_owner() {
 async fn owner_dropped_when_owner_id_cleared() {
     install_crypto();
     // `Duration::ZERO` + `StepClock` means every request triggers a recheck.
-    let (mut state, _td_p, _td_m) =
+    let (state, _td_p, _td_m) =
         build_state_with_overrides(empty_helix(), Duration::from_secs(0)).await;
-    state.owner_id = Some(Arc::from("42"));
+    set_owner(&state, Some("42"));
 
     let (sid, csrf, _bare) = insert_session_as(&state, "42", "alice", Role::Owner);
     let cookie = cookie_header(&sid, &csrf);
@@ -127,16 +127,13 @@ async fn owner_dropped_when_owner_id_cleared() {
     assert_eq!(
         resp.status(),
         StatusCode::OK,
-        "first request should be 200 while owner_id matches",
+        "first request should be 200 while owner matches settings",
     );
 
-    // Clone reuses the same SessionTable Arc, so the existing sid is still
-    // valid after we clear owner_id on the new state — mirroring how
-    // `auth_viewer_tier::viewer_dropped_from_allowlist_after_recheck_window`
-    // mutates the allowlist on a cloned state.
-    let mut state2 = state.clone();
-    state2.owner_id = None;
-    let app2 = owner_app(state2);
+    // `state.settings` is an Arc<ArcSwap<…>> shared by all clones; clearing
+    // owner here is visible to any router already built from a clone.
+    set_owner(&state, None);
+    let app2 = owner_app(state.clone());
 
     let resp = app2
         .oneshot(
@@ -152,6 +149,6 @@ async fn owner_dropped_when_owner_id_cleared() {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "owner_id cleared mid-session should drop the owner session on recheck",
+        "owner cleared in settings should drop the session on recheck",
     );
 }

@@ -145,9 +145,16 @@ async fn root_redirects_by_role() {
 #[tokio::test]
 async fn viewer_dropped_from_allowlist_after_recheck_window() {
     install_crypto();
-    let (mut state, _td_p, _td_m) =
+    let (state, _td_p, _td_m) =
         build_state_with_overrides(empty_helix(), Duration::from_secs(0)).await;
-    state.viewer_allowlist = Arc::from(vec!["42".to_owned()].into_boxed_slice());
+
+    // Inject viewer allowlist into the live settings handle before building
+    // the router so the role-recheck gate reads it from settings.
+    {
+        let mut s = (*state.settings.load_full()).clone();
+        s.twitch.viewer_allowlist = vec!["42".to_owned()];
+        state.settings.store(std::sync::Arc::new(s));
+    }
 
     let (sid, csrf, _bare) = insert_session_as(&state, "42", "alice", Role::Viewer);
     let cookie = cookie_header(&sid, &csrf);
@@ -167,13 +174,15 @@ async fn viewer_dropped_from_allowlist_after_recheck_window() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "first request should be 200");
 
-    // Clone reuses the same SessionTable Arc, so the existing sid is still
-    // valid after we clear the allowlist on the new state.
-    let mut state2 = state.clone();
-    state2.viewer_allowlist = Arc::from(Vec::<String>::new().into_boxed_slice());
-    let app2 = twitch_1337_web::build_router(state2);
+    // Now clear the allowlist in settings — the same handle is shared by the
+    // router, so the next role-recheck will see an empty list.
+    {
+        let mut s = (*state.settings.load_full()).clone();
+        s.twitch.viewer_allowlist = vec![];
+        state.settings.store(std::sync::Arc::new(s));
+    }
 
-    let resp = app2
+    let resp = app
         .oneshot(
             Request::builder()
                 .uri("/leaderboard")

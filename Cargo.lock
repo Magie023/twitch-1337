@@ -3340,6 +3340,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 name = "twitch-1337"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "chrono",
  "chrono-tz",
@@ -3372,6 +3373,7 @@ dependencies = [
  "eyre",
  "futures-util",
  "hex",
+ "humantime",
  "humantime-serde",
  "infer",
  "llm",
@@ -3407,6 +3409,7 @@ dependencies = [
 name = "twitch-1337-web"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "askama",
  "async-trait",
  "axum",

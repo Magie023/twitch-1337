@@ -106,7 +106,9 @@ them current.
 
 ## Config
 
-`config.toml` (copy `config.toml.example`). Sections: `[twitch]`, `[pings]`, `[ai]` (optional, api_key only), `[cooldowns]`, `[[schedules]]` (optional, repeatable). Schema + defaults in `config.toml.example` — treat as source of truth.
+`config.toml` (copy `config.toml.example`). Bootstrap sections only: `[twitch]` (secrets + channel/username), `[ai]` (api_key only, optional), `[[schedules]]` (optional, repeatable), `[aviationstack]` (api_key only, optional), `[web]` (bootstrap fields only). Schema + defaults in `config.toml.example` — treat as source of truth. Everything else lives in `settings.ron` managed via the dashboard.
+
+`[twitch]` holds OAuth credentials (`refresh_token`, `client_id`, `client_secret`), `channel`, `username`, and `owner` (optional Twitch user ID with full dashboard access). `owner` is bootstrap-only and lives here because it gates the settings page — it must not be editable from the thing it controls. Permission lists (`hidden_admins`, `viewer_allowlist`), channel pointers (`admin_channel`, `ai_channel`), and `expected_latency` live in `settings.ron`, managed via `/settings → Twitch · Permissions` and `Twitch · Channels`. `admin_channel` and `ai_channel` changes require a bot restart. Mods always pass the dashboard auth check; `viewer_allowlist` grants read-only access to non-mods.
 
 `[ai]` carries only the API key. Backend, model, base URL, memory caps,
 dreamer schedule, web/emote/media tool toggles, history caps, and every
@@ -116,6 +118,21 @@ legacy hoisted `[ai]` keys in `config.toml` are migrated into
 `settings.ron` once (sentinel: `$DATA_DIR/.ai_migrated_v2`); subsequent
 edits to those legacy keys are ignored.
 
+`[aviationstack]` keeps only `api_key` in config.toml. `enabled`, `base_url`,
+and `timeout_secs` live in `settings.ron` (restart-required for connection
+changes), managed via `/settings → Aviationstack`.
+
+`[suspend]` is removed from config.toml entirely. `default_duration_secs`
+lives in `settings.ron`, managed via `/settings → Suspend`.
+
+`[web]` bootstrap fields (`enabled`, `bind_addr`, `public_url`, `session_secret`)
+stay in config.toml; `session_ttl` and `mod_check_refresh` live in `settings.ron`,
+managed via `/settings → Web · Sessions`.
+
+On first v3 launch, `[twitch]` permission/channel keys and `[aviationstack]`/`[suspend]`/`[web]`
+non-secret keys are migrated into `settings.ron` once (sentinel: `$DATA_DIR/.config_migrated_v3`);
+subsequent edits to those legacy keys in config.toml are ignored.
+
 Backend and connection `base_url` changes from the dashboard require a
 bot restart (UI shows a "restart required" badge). Everything else
 applies live via `SettingsHandle` (model, timeout, reasoning_effort,
@@ -124,15 +141,7 @@ web tools, emotes, media). The `GET /settings/ai/models` endpoint
 proxies upstream `/v1/models` (OpenAI) or `/api/tags` (Ollama) with a
 5-minute TTL cache so the model picker can autocomplete.
 
-**Dashboard viewer tier:** read-only viewer access is gated by a static
-allowlist at `[twitch].viewer_allowlist` (numeric Twitch user IDs, same shape
-as `hidden_admins`). Mods always pass. No additional Twitch scopes are
-required beyond the existing bot scopes (`chat:read`, `chat:edit`,
-`user:manage:whispers`).
-
 Schedules hot-reload on save (2s debounce via notify-debouncer-mini). No restart.
-
-`twitch.ai_channel` (optional): bot also joins this channel; only `!ai` is reachable there. Every other command, the 1337 tracker, and chat-history recording skip messages from it. AI memory and chat history remain global / primary-only.
 
 OAuth credentials + AI API key wrapped in `SecretString` (secrecy crate). Config structs are `Deserialize`-only; do NOT add `Serialize` derive (closes credential-leak via debug dump).
 

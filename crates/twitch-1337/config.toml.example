@@ -17,50 +17,21 @@ client_id = "your_client_id"
 # Twitch application client secret
 client_secret = "your_client_secret"
 
-# Initial seed for IRC latency estimate in milliseconds (optional, default: 100)
-# The bot measures actual latency via PING/PONG every 5 minutes and auto-adjusts.
-# expected_latency = 89
-
-# Twitch user IDs of hidden admins (can manage pings without being a mod)
-# hidden_admins = ["12345678"]
-
-# Twitch user IDs granted read-only viewer access to the web dashboard.
-# viewer_allowlist = ["12345678", "87654321"]
-
-# Twitch user ID with full dashboard access, including the settings page.
-# Absent → settings page returns 403 for everyone. Single value for v1; a
-# tiered permission system replaces it later.
+# Twitch user ID with full dashboard access including the settings page.
+# Absent → no owner exists and the settings page returns 403.
 # owner = "12345678"
 
-# Optional: A separate channel for testing bot commands (broadcaster-only access)
-# admin_channel = "my_test_channel"
-
-# Optional: A dedicated channel where only `!ai` is reachable. Useful for
-# moving AI command spam off the primary channel. Must differ from both
-# `channel` and `admin_channel`.
-# ai_channel = "my_bot_account"
-
-# Cooldowns and ping policy are managed from the dashboard (`/settings`,
-# owner-only). They live in `$DATA_DIR/settings.ron` after the first save.
+# Permissions (hidden_admins, viewer_allowlist), the secondary channels
+# (admin_channel, ai_channel), and expected_latency now live in the
+# dashboard (`/settings → Twitch · Permissions` and `Twitch · Channels`).
 
 # Optional: Aviationstack metadata enrichment for !track.
-# The bot uses this at most once per newly tracked flight to fetch route,
-# actual departure time, and to accept known flights before live ADS-B has data.
-# After that, availability checks use the ADS-B pending-flight cadence; live
-# tracking uses the ADS-B aggregator fallback chain.
-# Free Aviationstack accounts have a small monthly request quota, so keep this
-# disabled unless you have configured an API key.
+# The api_key is a secret and stays in config.toml. Enable + base_url +
+# timeout_secs are managed in the dashboard (`/settings → Aviationstack`).
 # [aviationstack]
-# enabled = false
 # api_key = "your_aviationstack_api_key_here"
-# base_url = "https://api.aviationstack.com/v1"
-# timeout_secs = 5
 
-# Optional: Suspend configuration
-# Controls the default suspend duration applied when no explicit duration is given.
-# Must be between 1 second and 604800 seconds (7 days).
-# [suspend]
-# default_duration_secs = 600  # Default suspend duration in seconds (default: 600 = 10 min)
+# Suspend defaults now live in the dashboard (`/settings → Suspend`).
 
 # Optional: AI configuration for the !ai command
 # If absent, the !ai command is disabled.
@@ -104,5 +75,5 @@ client_secret = "your_client_secret"
 # bind_addr = "0.0.0.0:8080"
 # public_url = "https://bot.example.com"
 # session_secret = "<32+ bytes of hex>"
-# session_ttl = "7d"
-# mod_check_refresh = "5m"
+# # session_ttl and mod_check_refresh are now managed in the dashboard
+# # (`/settings → Web · Sessions`).

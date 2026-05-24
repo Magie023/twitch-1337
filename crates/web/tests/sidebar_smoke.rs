@@ -12,7 +12,7 @@ use twitch_1337_web::helix::{HelixClient, HelixUser};
 mod helpers;
 use helpers::{
     FakeHelix, build_state_with_dirs, cookie_header, insert_session, insert_session_as,
-    install_crypto,
+    install_crypto, set_owner,
 };
 
 /// FakeHelix flavored to admit the seeded test user during periodic mod
@@ -84,13 +84,13 @@ async fn memory_state_page_highlights_state() {
 #[tokio::test]
 async fn settings_nav_link_only_visible_to_owner() {
     install_crypto();
-    // Mod session against a different owner_id must NOT see the Settings nav.
+    // Mod session against a different owner must NOT see the Settings nav.
     let helix = Arc::new(FakeHelix {
         moderators: vec![],
         users: HashMap::new(),
     });
-    let (mut state, _td_pings, _td_mem) = build_state_with_dirs(helix).await;
-    state.owner_id = Some(Arc::from("999"));
+    let (state, _td_pings, _td_mem) = build_state_with_dirs(helix).await;
+    set_owner(&state, Some("999"));
     let (sid, csrf, _bare) =
         insert_session_as(&state, "42", "modder", twitch_1337_web::auth::Role::Mod);
     let app = build_router(state);
@@ -108,13 +108,13 @@ async fn settings_nav_link_only_visible_to_owner() {
         "Settings nav link must be hidden for non-owner sessions",
     );
 
-    // Owner session (user_id matches state.owner_id) must see the nav link.
+    // Owner session (user_id matches settings owner) must see the nav link.
     let helix = Arc::new(FakeHelix {
         moderators: vec![],
         users: HashMap::new(),
     });
-    let (mut state, _td_pings, _td_mem) = build_state_with_dirs(helix).await;
-    state.owner_id = Some(Arc::from("999"));
+    let (state, _td_pings, _td_mem) = build_state_with_dirs(helix).await;
+    set_owner(&state, Some("999"));
     let (sid, csrf, _bare) =
         insert_session_as(&state, "999", "boss", twitch_1337_web::auth::Role::Owner);
     let app = build_router(state);

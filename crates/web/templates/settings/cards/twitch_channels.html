@@ -1,0 +1,63 @@
+{# crates/web/templates/settings/cards/twitch_channels.html #}
+{% import "settings/_macros.html" as m %}
+
+<section id="sec-twitch_channels" class="settings-card" data-section="twitch_channels">
+  <header class="settings-card-head">
+    <div>
+      <h2>Twitch · Channels</h2>
+      <p>IRC channel configuration. Channel changes require a bot restart.</p>
+    </div>
+    <div class="settings-card-tag">
+      <span class="card-dirty" hidden>0 modified</span>
+    </div>
+  </header>
+  <div class="settings-rows">
+    {% call m::num_row_bounded("twitch_channels", "twitch_expected_latency", "expected_latency",
+       "Expected IRC latency in milliseconds. Used by the 1337 tracker for precise wake-up timing.",
+       current.twitch.expected_latency, defaults.twitch.expected_latency, "ms", 0, 1000) %}{% endcall %}
+    <div class="settings-row" data-section="twitch_channels">
+      <div class="row-left">
+        <div class="row-label"><span class="dirty-dot" aria-hidden="true"></span><code class="row-key">admin_channel</code><span class="restart-required">restart required</span></div>
+        <div class="row-hint">Optional separate IRC channel for admin-only commands. Empty to disable.</div>
+      </div>
+      <div class="row-control-cell">
+        {% let admin_channel_val = current.twitch.admin_channel.as_deref().unwrap_or("") %}
+        {% let admin_channel_default = defaults.twitch.admin_channel.as_deref().unwrap_or("") %}
+        <span class="row-pretty" aria-hidden="true">{% if admin_channel_val.is_empty() %}<span class="muted">#channel</span>{% else %}{{ admin_channel_val }}{% endif %}</span>
+        <input type="text"
+               class="text-input is-wide"
+               name="twitch_admin_channel"
+               value="{{ admin_channel_val }}"
+               placeholder="#channel"
+               data-default="{{ admin_channel_default }}"
+               data-key="admin_channel">
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("admin_channel") %}{% endcall %}
+        <span class="row-default">default <span class="mono">{% if admin_channel_default.is_empty() %}(empty){% else %}{{ admin_channel_default }}{% endif %}</span></span>
+      </div>
+    </div>
+    <div class="settings-row" data-section="twitch_channels">
+      <div class="row-left">
+        <div class="row-label"><span class="dirty-dot" aria-hidden="true"></span><code class="row-key">ai_channel</code><span class="restart-required">restart required</span></div>
+        <div class="row-hint">Optional IRC channel where only <code>!ai</code> is available. Empty to disable.</div>
+      </div>
+      <div class="row-control-cell">
+        {% let ai_channel_val = current.twitch.ai_channel.as_deref().unwrap_or("") %}
+        {% let ai_channel_default = defaults.twitch.ai_channel.as_deref().unwrap_or("") %}
+        <span class="row-pretty" aria-hidden="true">{% if ai_channel_val.is_empty() %}<span class="muted">#channel</span>{% else %}{{ ai_channel_val }}{% endif %}</span>
+        <input type="text"
+               class="text-input is-wide"
+               name="twitch_ai_channel"
+               value="{{ ai_channel_val }}"
+               placeholder="#channel"
+               data-default="{{ ai_channel_default }}"
+               data-key="ai_channel">
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("ai_channel") %}{% endcall %}
+        <span class="row-default">default <span class="mono">{% if ai_channel_default.is_empty() %}(empty){% else %}{{ ai_channel_default }}{% endif %}</span></span>
+      </div>
+    </div>
+  </div>
+</section>

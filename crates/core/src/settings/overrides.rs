@@ -20,6 +20,14 @@ pub struct SettingsOverrides {
     pub pings: PingsOverrides,
     #[serde(default)]
     pub ai: AiOverrides,
+    #[serde(default)]
+    pub twitch: TwitchOverrides,
+    #[serde(default)]
+    pub aviationstack: AviationstackOverrides,
+    #[serde(default)]
+    pub suspend: SuspendOverrides,
+    #[serde(default)]
+    pub web: WebRuntimeOverrides,
 }
 
 fn default_schema_version() -> u32 {
@@ -33,6 +41,10 @@ impl Default for SettingsOverrides {
             cooldowns: CooldownsOverrides::default(),
             pings: PingsOverrides::default(),
             ai: AiOverrides::default(),
+            twitch: TwitchOverrides::default(),
+            aviationstack: AviationstackOverrides::default(),
+            suspend: SuspendOverrides::default(),
+            web: WebRuntimeOverrides::default(),
         }
     }
 }
@@ -226,4 +238,42 @@ pub struct AiMediaOverrides {
     pub max_video_size: Option<bytesize::ByteSize>,
     #[serde(default)]
     pub max_text_size: Option<bytesize::ByteSize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TwitchOverrides {
+    #[serde(default)]
+    pub expected_latency: Option<u32>,
+    #[serde(default)]
+    pub hidden_admins: Option<Vec<String>>,
+    #[serde(default)]
+    pub viewer_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    pub admin_channel: Option<Option<String>>,
+    #[serde(default)]
+    pub ai_channel: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AviationstackOverrides {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SuspendOverrides {
+    #[serde(default)]
+    pub default_duration_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebRuntimeOverrides {
+    #[serde(default)]
+    pub session_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub mod_check_refresh_secs: Option<u64>,
 }

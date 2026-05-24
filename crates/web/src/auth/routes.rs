@@ -320,11 +320,17 @@ async fn callback(
         .await
         .map_err(|e| WebError::OAuthExchange(e.wrap_err("user lookup")))?;
 
-    let role = if state
-        .owner_id
-        .as_deref()
-        .is_some_and(|owner| owner == me.id.as_str())
-    {
+    // Load owner (bootstrap-only from config.toml) and settings fields before
+    // any `.await` so the ArcSwap guards are not held across async suspension.
+    let owner = (**state.owner.load()).clone();
+    let (hidden_admins, viewer_allowlist) = {
+        let twitch_cfg = state.settings.load();
+        (
+            twitch_cfg.twitch.hidden_admins.clone(),
+            twitch_cfg.twitch.viewer_allowlist.clone(),
+        )
+    };
+    let role = if owner.as_deref().is_some_and(|o| o == me.id.as_str()) {
         crate::auth::role::Role::Owner
     } else {
         match crate::auth::role_check::check_is_mod_with_token(
@@ -332,13 +338,13 @@ async fn callback(
             &me.id,
             &user_token,
             &state.broadcaster_id,
-            &state.hidden_admins,
+            &hidden_admins,
         )
         .await
         .map_err(|e| WebError::OAuthExchange(e.wrap_err("mod check")))?
         {
             GateOutcome::Allow => crate::auth::role::Role::Mod,
-            GateOutcome::Deny => match check_in_allowlist(&me.id, &state.viewer_allowlist) {
+            GateOutcome::Deny => match check_in_allowlist(&me.id, &viewer_allowlist) {
                 GateOutcome::Allow => crate::auth::role::Role::Viewer,
                 GateOutcome::Deny => {
                     tracing::info!(
@@ -407,9 +413,10 @@ async fn logout(
         .get(SID_COOKIE)
         .map(|c| c.value().to_owned())
         .ok_or(WebError::CsrfMismatch)?;
+    let session_ttl = std::time::Duration::from_secs(state.settings.load().web.session_ttl_secs);
     let session = state
         .sessions
-        .get_and_touch(&sid)
+        .get_and_touch(&sid, session_ttl)
         .ok_or(WebError::CsrfMismatch)?;
     if !crate::auth::csrf::verify(&form.csrf, &session.csrf_value) {
         return Err(WebError::CsrfMismatch);
@@ -482,9 +489,21 @@ pub async fn require_role(
         .signed(&state.signed_key)
         .get(SID_COOKIE)
         .ok_or_else(unauth)?;
+    // Read both web timing values from settings once, before any .await, so
+    // the ArcSwap guard is not held across an async suspension point.
+    let (session_ttl_secs, mod_check_refresh_secs) = {
+        let web_cfg = state.settings.load();
+        (
+            web_cfg.web.session_ttl_secs,
+            web_cfg.web.mod_check_refresh_secs,
+        )
+    };
     let session = state
         .sessions
-        .get_and_touch(sid_cookie.value())
+        .get_and_touch(
+            sid_cookie.value(),
+            std::time::Duration::from_secs(session_ttl_secs),
+        )
         .ok_or_else(unauth)?;
 
     if session.role < min {
@@ -496,13 +515,22 @@ pub async fn require_role(
         .signed_duration_since(session.last_role_check)
         .to_std()
         .unwrap_or_default();
-    if elapsed > state.config.role_check_refresh {
+    if elapsed > std::time::Duration::from_secs(mod_check_refresh_secs) {
+        // Load owner (bootstrap-only from config.toml) and settings fields
+        // before any `.await` so the ArcSwap guards are not held across async.
+        let owner = (**state.owner.load()).clone();
+        let (hidden_admins, viewer_allowlist) = {
+            let twitch_cfg = state.settings.load();
+            (
+                twitch_cfg.twitch.hidden_admins.clone(),
+                twitch_cfg.twitch.viewer_allowlist.clone(),
+            )
+        };
         let outcome: eyre::Result<GateOutcome> = match session.role {
             crate::auth::role::Role::Owner => {
-                if state
-                    .owner_id
+                if owner
                     .as_deref()
-                    .is_some_and(|owner| owner == session.user_id.as_str())
+                    .is_some_and(|o| o == session.user_id.as_str())
                 {
                     Ok(GateOutcome::Allow)
                 } else {
@@ -514,14 +542,13 @@ pub async fn require_role(
                     state.helix.as_ref(),
                     &session.user_id,
                     &state.broadcaster_id,
-                    state.hidden_admins.as_ref(),
+                    &hidden_admins,
                 )
                 .await
             }
-            crate::auth::role::Role::Viewer => Ok(check_in_allowlist(
-                &session.user_id,
-                &state.viewer_allowlist,
-            )),
+            crate::auth::role::Role::Viewer => {
+                Ok(check_in_allowlist(&session.user_id, &viewer_allowlist))
+            }
         };
         match outcome {
             Ok(GateOutcome::Allow) => state.sessions.record_role_check(sid_cookie.value()),

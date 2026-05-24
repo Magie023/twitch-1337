@@ -10,10 +10,10 @@ use tracing::info;
 
 use crate::database;
 
-fn default_expected_latency() -> u32 {
-    100
-}
-
+/// Bootstrap-only Twitch configuration. Only the fields required to connect
+/// to Twitch IRC and authenticate belong here. Runtime knobs (expected_latency,
+/// hidden_admins, viewer_allowlist, admin_channel, ai_channel) live in
+/// the dashboard settings store.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TwitchConfiguration {
     pub channel: String,
@@ -21,42 +21,19 @@ pub struct TwitchConfiguration {
     pub refresh_token: SecretString,
     pub client_id: SecretString,
     pub client_secret: SecretString,
-    #[serde(default = "default_expected_latency")]
-    pub expected_latency: u32,
-    #[serde(default)]
-    pub hidden_admins: Vec<String>,
-    /// Twitch user IDs granted read-only viewer access to the web dashboard.
-    /// IDs (not logins) so entries survive Twitch login renames.
-    #[serde(default)]
-    pub viewer_allowlist: Vec<String>,
-    /// Twitch user ID granted full dashboard access including the settings
-    /// page. Single value for v1; a tiered permission system replaces it
-    /// later. Absent → no owner exists and the settings page returns 403.
+    /// Twitch user ID with full dashboard access including the settings page.
+    /// Single value for v1; a tiered permission system replaces it later.
+    /// Absent → no owner exists and the settings page returns 403.
     #[serde(default)]
     pub owner: Option<String>,
-    #[serde(default)]
-    pub admin_channel: Option<String>,
-    #[serde(default)]
-    pub ai_channel: Option<String>,
 }
 
-fn default_aviationstack_base_url() -> String {
-    "https://api.aviationstack.com/v1".to_string()
-}
-
-fn default_aviationstack_timeout_secs() -> u64 {
-    5
-}
-
+/// Bootstrap-only aviationstack configuration. Only the secret api_key belongs
+/// here; `enabled`, `base_url`, and `timeout_secs` live in the dashboard
+/// settings store under `aviationstack.*`.
 #[derive(Debug, Clone, Deserialize)]
-pub struct AviationstackConfig {
-    #[serde(default)]
-    pub enabled: bool,
+pub struct AviationstackBootstrap {
     pub api_key: SecretString,
-    #[serde(default = "default_aviationstack_base_url")]
-    pub base_url: String,
-    #[serde(default = "default_aviationstack_timeout_secs")]
-    pub timeout_secs: u64,
 }
 
 /// Bootstrap-only AI configuration. The secret api_key stays in
@@ -65,24 +42,6 @@ pub struct AviationstackConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AiBootstrap {
     pub api_key: SecretString,
-}
-
-fn default_suspend_duration() -> u64 {
-    600
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SuspendConfig {
-    #[serde(default = "default_suspend_duration")]
-    pub default_duration_secs: u64,
-}
-
-impl Default for SuspendConfig {
-    fn default() -> Self {
-        Self {
-            default_duration_secs: default_suspend_duration(),
-        }
-    }
 }
 
 fn default_enabled() -> bool {
@@ -123,21 +82,12 @@ pub struct WebConfig {
     pub public_url: String,
     #[serde(default = "default_web_session_secret")]
     pub session_secret: SecretString,
-    #[serde(default = "default_session_ttl", with = "humantime_serde")]
-    pub session_ttl: std::time::Duration,
-    #[serde(default = "default_mod_check_refresh", with = "humantime_serde")]
-    pub mod_check_refresh: std::time::Duration,
 }
 
 fn default_web_bind() -> String {
     "127.0.0.1:8080".to_owned()
 }
-fn default_session_ttl() -> std::time::Duration {
-    std::time::Duration::from_secs(7 * 24 * 60 * 60)
-}
-fn default_mod_check_refresh() -> std::time::Duration {
-    std::time::Duration::from_secs(300)
-}
+
 fn default_web_session_secret() -> SecretString {
     SecretString::new(String::new().into())
 }
@@ -149,8 +99,6 @@ impl Default for WebConfig {
             bind_addr: default_web_bind(),
             public_url: String::new(),
             session_secret: default_web_session_secret(),
-            session_ttl: default_session_ttl(),
-            mod_check_refresh: default_mod_check_refresh(),
         }
     }
 }
@@ -159,9 +107,7 @@ impl Default for WebConfig {
 pub struct Configuration {
     pub twitch: TwitchConfiguration,
     #[serde(default)]
-    pub aviationstack: Option<AviationstackConfig>,
-    #[serde(default)]
-    pub suspend: SuspendConfig,
+    pub aviationstack: Option<AviationstackBootstrap>,
     #[serde(default)]
     pub ai: Option<AiBootstrap>,
     #[serde(default)]
@@ -183,15 +129,9 @@ impl Configuration {
                 refresh_token: SecretString::new("test".into()),
                 client_id: SecretString::new("test".into()),
                 client_secret: SecretString::new("test".into()),
-                expected_latency: 100,
-                hidden_admins: Vec::new(),
-                viewer_allowlist: Vec::new(),
                 owner: None,
-                admin_channel: None,
-                ai_channel: None,
             },
             aviationstack: None,
-            suspend: SuspendConfig::default(),
             ai: None,
             schedules: Vec::new(),
             web: WebConfig::default(),
@@ -227,11 +167,6 @@ pub async fn load_configuration() -> Result<(Configuration, toml::Value)> {
 
     validate_config(&config)?;
 
-    info!(
-        owner_configured = config.twitch.owner.is_some(),
-        "Resolved dashboard owner"
-    );
-
     Ok((config, value))
 }
 
@@ -245,61 +180,12 @@ pub fn validate_config(config: &Configuration) -> Result<()> {
         bail!("twitch.username cannot be empty");
     }
 
-    if config.twitch.expected_latency > 1000 {
-        bail!(
-            "twitch.expected_latency must be <= 1000ms (got {})",
-            config.twitch.expected_latency
-        );
-    }
-
-    if let Some(ref admin_ch) = config.twitch.admin_channel {
-        if admin_ch.trim().is_empty() {
-            bail!("twitch.admin_channel cannot be empty when specified");
-        }
-        if admin_ch == &config.twitch.channel {
-            bail!("twitch.admin_channel must be different from twitch.channel");
-        }
-    }
-
-    if let Some(ref ai_ch) = config.twitch.ai_channel {
-        if ai_ch.trim().is_empty() {
-            bail!("twitch.ai_channel cannot be empty when specified");
-        }
-        if ai_ch == &config.twitch.channel {
-            bail!("twitch.ai_channel must be different from twitch.channel");
-        }
-        // Cross-check: admin_channel block above cannot see ai_channel, so the
-        // admin_channel == ai_channel guard lives here. Keep this branch second.
-        if let Some(ref admin_ch) = config.twitch.admin_channel
-            && ai_ch == admin_ch
-        {
-            bail!("twitch.ai_channel must be different from twitch.admin_channel");
-        }
-    }
-
-    if !(1..=7 * 86400).contains(&config.suspend.default_duration_secs) {
-        bail!(
-            "suspend.default_duration_secs must be between 1 and 604800 (7 days) (got {})",
-            config.suspend.default_duration_secs
-        );
-    }
-
-    if let Some(ref aviationstack) = config.aviationstack {
-        if aviationstack.enabled && aviationstack.api_key.expose_secret().trim().is_empty() {
-            bail!("aviationstack.api_key cannot be empty when aviationstack is enabled");
-        }
-        if aviationstack.base_url.trim().is_empty() {
-            bail!("aviationstack.base_url cannot be empty");
-        }
-        reqwest::Url::parse(&aviationstack.base_url).wrap_err_with(|| {
-            format!(
-                "aviationstack.base_url must be a valid URL (got {:?})",
-                aviationstack.base_url
-            )
-        })?;
-        if aviationstack.timeout_secs == 0 {
-            bail!("aviationstack.timeout_secs must be > 0");
-        }
+    if config
+        .aviationstack
+        .as_ref()
+        .is_some_and(|av| av.api_key.expose_secret().trim().is_empty())
+    {
+        bail!("aviationstack.api_key cannot be empty when aviationstack is configured");
     }
 
     if let Some(ref ai) = config.ai
@@ -335,14 +221,6 @@ pub fn validate_config(config: &Configuration) -> Result<()> {
                 config.web.public_url
             );
         }
-        let ttl = config.web.session_ttl.as_secs();
-        if !(3600..=2_592_000).contains(&ttl) {
-            bail!("web.session_ttl must be between 1h and 30d (got {ttl}s)");
-        }
-        let refresh = config.web.mod_check_refresh.as_secs();
-        if !(30..=3600).contains(&refresh) {
-            bail!("web.mod_check_refresh must be between 30s and 1h (got {refresh}s)");
-        }
     }
 
     Ok(())
@@ -351,47 +229,6 @@ pub fn validate_config(config: &Configuration) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ai_channel_must_differ_from_main_channel() {
-        let mut config = Configuration::test_default();
-        config.twitch.ai_channel = Some(config.twitch.channel.clone());
-        let err = validate_config(&config).unwrap_err().to_string();
-        assert!(
-            err.contains("ai_channel must be different from twitch.channel"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn ai_channel_must_differ_from_admin_channel() {
-        let mut config = Configuration::test_default();
-        config.twitch.admin_channel = Some("admins".into());
-        config.twitch.ai_channel = Some("admins".into());
-        let err = validate_config(&config).unwrap_err().to_string();
-        assert!(
-            err.contains("ai_channel must be different from twitch.admin_channel"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn ai_channel_cannot_be_blank_when_set() {
-        let mut config = Configuration::test_default();
-        config.twitch.ai_channel = Some("   ".into());
-        let err = validate_config(&config).unwrap_err().to_string();
-        assert!(
-            err.contains("ai_channel cannot be empty when specified"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn ai_channel_some_distinct_value_validates() {
-        let mut config = Configuration::test_default();
-        config.twitch.ai_channel = Some("ai_chan".into());
-        validate_config(&config).expect("distinct ai_channel must validate");
-    }
 
     #[test]
     fn ai_bootstrap_parses_api_key_only() {
@@ -411,6 +248,50 @@ mod tests {
         .expect("parse");
         let boot = cfg.ai.as_ref().expect("ai present");
         assert!(!boot.api_key.expose_secret().is_empty());
+    }
+
+    #[test]
+    fn aviationstack_bootstrap_parses_api_key_only() {
+        let cfg: Configuration = toml::from_str(
+            r#"
+            [twitch]
+            channel = "c"
+            username = "u"
+            refresh_token = "r"
+            client_id = "i"
+            client_secret = "s"
+
+            [aviationstack]
+            api_key = "av-key"
+        "#,
+        )
+        .expect("parse");
+        let boot = cfg.aviationstack.as_ref().expect("aviationstack present");
+        assert!(!boot.api_key.expose_secret().is_empty());
+    }
+
+    #[test]
+    fn legacy_twitch_keys_silently_ignored() {
+        // Fields that have moved to the settings store should parse without error.
+        // `owner` is back in TwitchConfiguration, so it is parsed normally.
+        let cfg: Configuration = toml::from_str(
+            r#"
+            [twitch]
+            channel = "c"
+            username = "u"
+            refresh_token = "r"
+            client_id = "i"
+            client_secret = "s"
+            expected_latency = 200
+            hidden_admins = ["123"]
+            owner = "456"
+            admin_channel = "admins"
+            ai_channel = "ai"
+        "#,
+        )
+        .expect("parse — legacy keys are silently ignored by serde (owner is parsed)");
+        assert_eq!(cfg.twitch.channel, "c");
+        assert_eq!(cfg.twitch.owner.as_deref(), Some("456"));
     }
 
     #[test]
@@ -438,16 +319,5 @@ mod tests {
         cfg.web.public_url = "https://bot.test".into();
         let err = validate_config(&cfg).unwrap_err().to_string();
         assert!(err.contains("session_secret"), "{err}");
-    }
-
-    #[test]
-    fn web_enabled_validates_ttl_range() {
-        let mut cfg = Configuration::test_default();
-        cfg.web.enabled = true;
-        cfg.web.session_secret = secrecy::SecretString::new("00".repeat(32).into());
-        cfg.web.public_url = "https://bot.test".into();
-        cfg.web.session_ttl = std::time::Duration::from_secs(10); // below 1h
-        let err = validate_config(&cfg).unwrap_err().to_string();
-        assert!(err.contains("session_ttl"), "{err}");
     }
 }

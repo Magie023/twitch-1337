@@ -27,6 +27,7 @@ pub struct SettingsStore {
     handle: SettingsHandle,
     audit: Arc<dyn AuditLog>,
     write_lock: Mutex<()>,
+    boot_channel: String,
 }
 
 impl SettingsStore {
@@ -38,12 +39,16 @@ impl SettingsStore {
     pub fn open(
         data_dir: &Path,
         audit: Arc<dyn AuditLog>,
+        boot_channel: &str,
     ) -> Result<(Arc<Self>, SettingsHandle), SettingsError> {
         let path = data_dir.join(FILE_NAME);
         let defaults = Settings::compiled_defaults();
         let overrides = load_or_quarantine(&path)?;
         let resolved = Settings::resolve(&defaults, &overrides);
-        if let Err(errs) = resolved.validate() {
+        let ctx = super::ValidationContext {
+            channel: boot_channel.to_owned(),
+        };
+        if let Err(errs) = resolved.validate(&ctx) {
             warn!(
                 ?errs,
                 "settings.ron failed validation; falling back to compile defaults"
@@ -56,6 +61,7 @@ impl SettingsStore {
                 handle: handle.clone(),
                 audit,
                 write_lock: Mutex::new(()),
+                boot_channel: boot_channel.to_owned(),
             });
             return Ok((store, handle));
         }
@@ -66,6 +72,7 @@ impl SettingsStore {
             handle: handle.clone(),
             audit,
             write_lock: Mutex::new(()),
+            boot_channel: boot_channel.to_owned(),
         });
         info!("settings store opened");
         Ok((store, handle))
@@ -89,7 +96,10 @@ impl SettingsStore {
         let prior_resolved = Settings::resolve(&self.defaults, &current);
         merge_into(&mut current, &patch);
         let resolved = Settings::resolve(&self.defaults, &current);
-        if let Err(errs) = resolved.validate() {
+        let ctx = super::ValidationContext {
+            channel: self.boot_channel.clone(),
+        };
+        if let Err(errs) = resolved.validate(&ctx) {
             return Err(SettingsError::Validation(errs));
         }
         crate::util::persist::atomic_save_ron_async(&current, &self.path).await?;
@@ -129,6 +139,20 @@ impl SettingsStore {
             SettingsSection::AiWeb => current.ai.web = Default::default(),
             SettingsSection::AiEmotes => current.ai.emotes = Default::default(),
             SettingsSection::AiMedia => current.ai.media = Default::default(),
+            SettingsSection::TwitchPermissions => {
+                current.twitch.hidden_admins = None;
+                current.twitch.viewer_allowlist = None;
+            }
+            SettingsSection::TwitchChannels => {
+                current.twitch.admin_channel = None;
+                current.twitch.ai_channel = None;
+                // expected_latency is a network-tuning knob; intentionally not
+                // reset here so channel resets don't clobber latency tweaks.
+                // Users can clear it by setting the field to the default value.
+            }
+            SettingsSection::Aviationstack => current.aviationstack = Default::default(),
+            SettingsSection::Suspend => current.suspend = Default::default(),
+            SettingsSection::WebRuntime => current.web = Default::default(),
         }
         let resolved = Settings::resolve(&self.defaults, &current);
         crate::util::persist::atomic_save_ron_async(&current, &self.path).await?;
@@ -361,6 +385,43 @@ fn merge_into(into: &mut SettingsOverrides, patch: &SettingsOverrides) {
     }
     if let Some(v) = patch.ai.media.max_text_size {
         into.ai.media.max_text_size = Some(v);
+    }
+    // Twitch
+    if let Some(v) = patch.twitch.expected_latency {
+        into.twitch.expected_latency = Some(v);
+    }
+    if patch.twitch.hidden_admins.is_some() {
+        into.twitch.hidden_admins = patch.twitch.hidden_admins.clone();
+    }
+    if patch.twitch.viewer_allowlist.is_some() {
+        into.twitch.viewer_allowlist = patch.twitch.viewer_allowlist.clone();
+    }
+    if patch.twitch.admin_channel.is_some() {
+        into.twitch.admin_channel = patch.twitch.admin_channel.clone();
+    }
+    if patch.twitch.ai_channel.is_some() {
+        into.twitch.ai_channel = patch.twitch.ai_channel.clone();
+    }
+    // Aviationstack
+    if let Some(v) = patch.aviationstack.enabled {
+        into.aviationstack.enabled = Some(v);
+    }
+    if let Some(v) = patch.aviationstack.base_url.as_ref() {
+        into.aviationstack.base_url = Some(v.clone());
+    }
+    if let Some(v) = patch.aviationstack.timeout_secs {
+        into.aviationstack.timeout_secs = Some(v);
+    }
+    // Suspend
+    if let Some(v) = patch.suspend.default_duration_secs {
+        into.suspend.default_duration_secs = Some(v);
+    }
+    // Web
+    if let Some(v) = patch.web.session_ttl_secs {
+        into.web.session_ttl_secs = Some(v);
+    }
+    if let Some(v) = patch.web.mod_check_refresh_secs {
+        into.web.mod_check_refresh_secs = Some(v);
     }
 }
 
@@ -638,6 +699,65 @@ fn diff_changes(prior: &Settings, next: &Settings) -> Vec<AuditChange> {
         prior.ai.media.max_text_size,
         next.ai.media.max_text_size
     );
+    // Twitch runtime
+    cmp!(
+        "twitch.expected_latency",
+        prior.twitch.expected_latency,
+        next.twitch.expected_latency
+    );
+    cmp!(
+        "twitch.hidden_admins",
+        prior.twitch.hidden_admins.as_slice(),
+        next.twitch.hidden_admins.as_slice()
+    );
+    cmp!(
+        "twitch.viewer_allowlist",
+        prior.twitch.viewer_allowlist.as_slice(),
+        next.twitch.viewer_allowlist.as_slice()
+    );
+    cmp!(
+        "twitch.admin_channel",
+        prior.twitch.admin_channel.as_deref(),
+        next.twitch.admin_channel.as_deref()
+    );
+    cmp!(
+        "twitch.ai_channel",
+        prior.twitch.ai_channel.as_deref(),
+        next.twitch.ai_channel.as_deref()
+    );
+    // Aviationstack
+    cmp!(
+        "aviationstack.enabled",
+        prior.aviationstack.enabled,
+        next.aviationstack.enabled
+    );
+    cmp!(
+        "aviationstack.base_url",
+        prior.aviationstack.base_url.as_str(),
+        next.aviationstack.base_url.as_str()
+    );
+    cmp!(
+        "aviationstack.timeout_secs",
+        prior.aviationstack.timeout_secs,
+        next.aviationstack.timeout_secs
+    );
+    // Suspend
+    cmp!(
+        "suspend.default_duration_secs",
+        prior.suspend.default_duration_secs,
+        next.suspend.default_duration_secs
+    );
+    // Web runtime
+    cmp!(
+        "web.session_ttl_secs",
+        prior.web.session_ttl_secs,
+        next.web.session_ttl_secs
+    );
+    cmp!(
+        "web.mod_check_refresh_secs",
+        prior.web.mod_check_refresh_secs,
+        next.web.mod_check_refresh_secs
+    );
     out
 }
 
@@ -656,7 +776,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = Arc::new(MemoryAuditLog::new());
         let (store, handle) =
-            SettingsStore::open(dir.path(), log.clone()).expect("open empty store");
+            SettingsStore::open(dir.path(), log.clone(), "test_chan").expect("open empty store");
         (dir, store, handle, log)
     }
 
@@ -683,9 +803,10 @@ mod tests {
         store.apply(patch, actor).await.expect("apply");
         assert_eq!(handle.load().cooldowns.ai, 15);
         // round-trip from disk
-        let dropped_handle = SettingsStore::open(store.path.parent().unwrap(), log.clone())
-            .expect("reopen")
-            .1;
+        let dropped_handle =
+            SettingsStore::open(store.path.parent().unwrap(), log.clone(), "test_chan")
+                .expect("reopen")
+                .1;
         assert_eq!(dropped_handle.load().cooldowns.ai, 15);
         let entries = log.snapshot();
         assert_eq!(entries.len(), 1);
@@ -766,6 +887,7 @@ mod tests {
         let reopened = SettingsStore::open(
             store.path.parent().unwrap(),
             Arc::new(crate::settings::audit::MemoryAuditLog::new()),
+            "test_chan",
         )
         .expect("reopen")
         .1;
@@ -778,7 +900,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join(FILE_NAME), "not valid ron").expect("write garbage");
         let log = Arc::new(MemoryAuditLog::new());
-        let (_store, handle) = SettingsStore::open(dir.path(), log).expect("open should not fail");
+        let (_store, handle) =
+            SettingsStore::open(dir.path(), log, "test_chan").expect("open should not fail");
         assert_eq!(**handle.load(), Settings::compiled_defaults());
         // settings.ron has been renamed away
         assert!(!dir.path().join(FILE_NAME).exists());
@@ -828,5 +951,151 @@ mod tests {
         let keys: Vec<&str> = changes.iter().map(|c| c.key.as_str()).collect();
         assert!(keys.contains(&"ai.connection.service_tier"), "got {keys:?}");
         assert!(keys.contains(&"ai.dreamer.service_tier"), "got {keys:?}");
+    }
+
+    #[test]
+    fn diff_emits_twitch_section_changes() {
+        let prior = Settings::compiled_defaults();
+        let mut next = Settings::compiled_defaults();
+        next.twitch.expected_latency = 200;
+        next.twitch.hidden_admins = vec!["111".into()];
+        next.twitch.admin_channel = Some("admins".into());
+        let changes = diff_changes(&prior, &next);
+        let keys: Vec<&str> = changes.iter().map(|c| c.key.as_str()).collect();
+        assert!(
+            keys.iter().any(|k| k.starts_with("twitch.")),
+            "diff must include at least one twitch.* entry; got {keys:?}"
+        );
+        assert!(keys.contains(&"twitch.expected_latency"), "got {keys:?}");
+        assert!(keys.contains(&"twitch.hidden_admins"), "got {keys:?}");
+        assert!(keys.contains(&"twitch.admin_channel"), "got {keys:?}");
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use crate::settings::overrides::{
+        AviationstackOverrides, SuspendOverrides, TwitchOverrides, WebRuntimeOverrides,
+    };
+
+    #[test]
+    fn merge_twitch_overrides_replaces_lists() {
+        let mut into = SettingsOverrides::default();
+        into.twitch.hidden_admins = Some(vec!["old".into()]);
+        let patch = SettingsOverrides {
+            twitch: TwitchOverrides {
+                hidden_admins: Some(vec!["new1".into(), "new2".into()]),
+                expected_latency: Some(150),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        merge_into(&mut into, &patch);
+        assert_eq!(into.twitch.expected_latency, Some(150));
+        assert_eq!(
+            into.twitch.hidden_admins.as_deref(),
+            Some(&vec!["new1".to_string(), "new2".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn merge_aviationstack_suspend_web() {
+        let mut into = SettingsOverrides::default();
+        let patch = SettingsOverrides {
+            aviationstack: AviationstackOverrides {
+                enabled: Some(true),
+                ..Default::default()
+            },
+            suspend: SuspendOverrides {
+                default_duration_secs: Some(900),
+            },
+            web: WebRuntimeOverrides {
+                session_ttl_secs: Some(3600),
+                mod_check_refresh_secs: Some(60),
+            },
+            ..Default::default()
+        };
+        merge_into(&mut into, &patch);
+        assert_eq!(into.aviationstack.enabled, Some(true));
+        assert_eq!(into.suspend.default_duration_secs, Some(900));
+        assert_eq!(into.web.session_ttl_secs, Some(3600));
+        assert_eq!(into.web.mod_check_refresh_secs, Some(60));
+    }
+
+    #[tokio::test]
+    async fn reset_twitch_permissions_clears_only_perm_fields() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let audit = std::sync::Arc::new(crate::settings::audit::MemoryAuditLog::default());
+        let (store, _h) = SettingsStore::open(dir.path(), audit, "main").expect("open");
+        store
+            .apply(
+                SettingsOverrides {
+                    twitch: crate::settings::overrides::TwitchOverrides {
+                        expected_latency: Some(250),
+                        hidden_admins: Some(vec!["111".into()]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Actor {
+                    user_id: "owner".into(),
+                    user_login: "owner".into(),
+                },
+            )
+            .await
+            .expect("apply");
+        let s = store
+            .reset(
+                SettingsSection::TwitchPermissions,
+                Actor {
+                    user_id: "owner".into(),
+                    user_login: "owner".into(),
+                },
+            )
+            .await
+            .expect("reset");
+        assert!(s.twitch.hidden_admins.is_empty());
+        assert_eq!(s.twitch.expected_latency, 250); // perm reset does not touch channels
+    }
+
+    #[tokio::test]
+    async fn reset_twitch_channels_preserves_expected_latency() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let audit = std::sync::Arc::new(crate::settings::audit::MemoryAuditLog::default());
+        let (store, _h) = SettingsStore::open(dir.path(), audit, "main").expect("open");
+        store
+            .apply(
+                SettingsOverrides {
+                    twitch: crate::settings::overrides::TwitchOverrides {
+                        expected_latency: Some(300),
+                        admin_channel: Some(Some("admins".into())),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Actor {
+                    user_id: "owner".into(),
+                    user_login: "owner".into(),
+                },
+            )
+            .await
+            .expect("apply");
+        let s = store
+            .reset(
+                SettingsSection::TwitchChannels,
+                Actor {
+                    user_id: "owner".into(),
+                    user_login: "owner".into(),
+                },
+            )
+            .await
+            .expect("reset");
+        // Channels reset clears admin_channel/ai_channel but not expected_latency.
+        assert!(s.twitch.admin_channel.is_none());
+        assert_eq!(
+            s.twitch.expected_latency, 300,
+            "TwitchChannels reset must not wipe expected_latency"
+        );
     }
 }

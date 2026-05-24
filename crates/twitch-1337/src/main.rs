@@ -54,52 +54,21 @@ pub async fn main() -> Result<()> {
 
     ensure_data_dir().await?;
 
-    let (incoming, client, credentials, bot_user_id) =
-        setup_and_verify_twitch_client(&config).await?;
-    let client = Arc::new(client);
-
-    let aviation_client = match aviation::AviationClient::new()
-        .map(|client| client.with_aviationstack_config(config.aviationstack.clone()))
-    {
-        Ok(c) => Some(c),
-        Err(e) => {
-            tracing::error!(
-                error = ?e,
-                "Failed to initialize aviation client; aviation commands and flight tracker disabled"
-            );
-            None
-        }
-    };
-
-    let doener_client = Arc::new(
-        doener::DoeneratlasClient::new().wrap_err("Failed to initialize Döneratlas client")?,
-    );
-    let whisper_credentials = credentials.clone();
-    let whisper = whisper::HelixWhisperSender::new(
-        whisper_credentials,
-        config.twitch.client_id.expose_secret().to_string(),
-        bot_user_id,
-        get_data_dir(),
-    )
-    .await
-    .map(|sender| Arc::new(sender) as Arc<dyn whisper::WhisperSender>)?;
-
-    let irc_connected = Arc::new(AtomicBool::new(false));
-
-    let ping_manager =
-        PingManager::load(&get_data_dir()).wrap_err("Failed to load ping manager")?;
-    let (ping_actor_tx, ping_actor_rx, ping_names_tx, ping_names_rx) = ping_actor_channel_full();
-
-    // Dashboard-managed runtime settings. Opened here so the same Arc-backed
-    // store can be shared with both the IRC handlers (via `Services.settings`)
-    // and `WebState` (Task 10 wires the POST handler). The audit log lives at
+    // Dashboard-managed runtime settings. Opened before IRC connect so the
+    // settings-store values (admin_channel, ai_channel) can be passed to the
+    // IRC setup which needs them to join channels at startup.
+    // The same Arc-backed store is shared with both the IRC handlers (via
+    // `Services.settings`) and `WebState`.  The audit log lives at
     // `$DATA_DIR/settings_audit.log`.
     let audit_log: Arc<dyn twitch_1337::settings::AuditLog> = Arc::new(
         twitch_1337::settings::FileAuditLog::new(get_data_dir().join("settings_audit.log")),
     );
-    let (settings_store, settings_handle) =
-        twitch_1337::settings::SettingsStore::open(&get_data_dir(), audit_log)
-            .wrap_err("Failed to open settings store")?;
+    let (settings_store, settings_handle) = twitch_1337::settings::SettingsStore::open(
+        &get_data_dir(),
+        audit_log,
+        &config.twitch.channel,
+    )
+    .wrap_err("Failed to open settings store")?;
 
     // One-shot migration: promote legacy [ai] keys from config.toml into
     // settings.ron on first v2 launch. A sentinel file prevents re-migration
@@ -125,6 +94,150 @@ pub async fn main() -> Result<()> {
         }
         std::fs::write(&migrated_marker, "").wrap_err("write .ai_migrated_v2 marker")?;
     }
+
+    // One-shot v3 migration: promote remaining non-secret, non-bootstrap keys
+    // from config.toml into settings.ron. Sentinel `.config_migrated_v3`
+    // prevents re-migration so later dashboard edits aren't clobbered.
+    // This MUST happen before the extra_channels capture so that
+    // admin_channel/ai_channel are populated from config.toml on the first v3
+    // boot and don't require an extra restart to take effect.
+    let v3_marker = get_data_dir().join(".config_migrated_v3");
+    let was_first_v3_boot = !v3_marker.exists();
+    if was_first_v3_boot {
+        let patch = twitch_1337::settings::migrate::migrate_legacy_config(&raw_toml)
+            .wrap_err("v3 migration")?;
+        let twitch_empty =
+            patch.twitch == twitch_1337::settings::overrides::TwitchOverrides::default();
+        let aviation_empty = patch.aviationstack
+            == twitch_1337::settings::overrides::AviationstackOverrides::default();
+        let suspend_empty =
+            patch.suspend == twitch_1337::settings::overrides::SuspendOverrides::default();
+        let web_empty =
+            patch.web == twitch_1337::settings::overrides::WebRuntimeOverrides::default();
+        if !(twitch_empty && aviation_empty && suspend_empty && web_empty) {
+            let actor = twitch_1337::settings::Actor {
+                user_id: "migrate".into(),
+                user_login: "v3-migration".into(),
+            };
+            settings_store
+                .apply(patch, actor)
+                .await
+                .wrap_err("v3 migration apply")?;
+            info!("migrated legacy config.toml keys into settings.ron (v3)");
+        }
+        std::fs::write(&v3_marker, "").wrap_err("write .config_migrated_v3 marker")?;
+    }
+
+    // Collect restart-required channel list from the now-post-migration snapshot.
+    // Placed here (after v3 migration) so admin_channel/ai_channel set by the
+    // migration are available on the first v3 boot, not just subsequent ones.
+    let twitch_runtime = settings_handle.load().twitch.clone();
+    let extra_channels: Vec<String> = [
+        twitch_runtime.admin_channel.clone(),
+        twitch_runtime.ai_channel.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let (incoming, client, credentials, bot_user_id) =
+        setup_and_verify_twitch_client(&config, &extra_channels).await?;
+    let client = Arc::new(client);
+
+    let doener_client = Arc::new(
+        doener::DoeneratlasClient::new().wrap_err("Failed to initialize Döneratlas client")?,
+    );
+    let whisper_credentials = credentials.clone();
+    let whisper = whisper::HelixWhisperSender::new(
+        whisper_credentials,
+        config.twitch.client_id.expose_secret().to_string(),
+        bot_user_id,
+        get_data_dir(),
+    )
+    .await
+    .map(|sender| Arc::new(sender) as Arc<dyn whisper::WhisperSender>)?;
+
+    let irc_connected = Arc::new(AtomicBool::new(false));
+
+    let ping_manager =
+        PingManager::load(&get_data_dir()).wrap_err("Failed to load ping manager")?;
+    let (ping_actor_tx, ping_actor_rx, ping_names_tx, ping_names_rx) = ping_actor_channel_full();
+
+    // Warn on subsequent boots if any migrated key still appears in config.toml
+    // — it's silently ignored after the v3 marker has been written. Skipped on
+    // the migration boot itself so we don't shout before the user can clean up.
+    let legacy_v3_keys: &[(&str, &[&str])] = &[
+        ("twitch.expected_latency", &["twitch", "expected_latency"]),
+        ("twitch.hidden_admins", &["twitch", "hidden_admins"]),
+        ("twitch.viewer_allowlist", &["twitch", "viewer_allowlist"]),
+        ("twitch.admin_channel", &["twitch", "admin_channel"]),
+        ("twitch.ai_channel", &["twitch", "ai_channel"]),
+        (
+            "suspend.default_duration_secs",
+            &["suspend", "default_duration_secs"],
+        ),
+        ("aviationstack.enabled", &["aviationstack", "enabled"]),
+        ("aviationstack.base_url", &["aviationstack", "base_url"]),
+        (
+            "aviationstack.timeout_secs",
+            &["aviationstack", "timeout_secs"],
+        ),
+        ("web.session_ttl", &["web", "session_ttl"]),
+        ("web.mod_check_refresh", &["web", "mod_check_refresh"]),
+    ];
+    let stale: Vec<&str> = legacy_v3_keys
+        .iter()
+        .filter_map(|(name, path)| {
+            let mut node = &raw_toml;
+            for seg in *path {
+                node = node.get(seg)?;
+            }
+            Some(*name)
+        })
+        .collect();
+    if !was_first_v3_boot && !stale.is_empty() {
+        tracing::warn!(
+            ?stale,
+            "legacy config.toml keys are now ignored after v3 migration; remove them from config.toml"
+        );
+    }
+
+    // Build aviation client from settings (restart-required fields).
+    // `enabled`, `base_url`, and `timeout_secs` come from the settings store;
+    // `api_key` remains in config.toml as a secret and is not dashboard-managed.
+    let aviation_client = {
+        let av_settings = settings_handle.load().aviationstack.clone();
+        if !av_settings.enabled {
+            info!("aviationstack disabled in settings; aviation features disabled");
+            None
+        } else {
+            // api_key comes from the bootstrap secret; other fields from settings.
+            let api_key = config.aviationstack.as_ref().map(|b| b.api_key.clone());
+            if api_key.is_none() {
+                tracing::warn!(
+                    "aviationstack.enabled=true in settings but no [aviationstack].api_key in \
+                     config.toml; metadata enrichment disabled. Set the api_key or disable in \
+                     /settings → Aviationstack."
+                );
+            }
+            match aviation::AviationClient::new().map(|client| {
+                client.with_aviationstack(
+                    api_key,
+                    av_settings.base_url.clone(),
+                    av_settings.timeout_secs,
+                )
+            }) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::error!(
+                        error = ?e,
+                        "Failed to initialize aviation client; aviation commands and flight tracker disabled"
+                    );
+                    None
+                }
+            }
+        }
+    };
 
     let llm_client = llm_factory::build_llm_client(config.ai.as_ref(), &settings_handle.load())?;
 
@@ -254,7 +367,6 @@ async fn build_web_spawner(
 
     let web_clock = Arc::new(twitch_1337_web::clock::SystemClock);
     let sessions = Arc::new(twitch_1337_web::auth::session::SessionTable::new(
-        config.web.session_ttl,
         web_clock.clone(),
     ));
 
@@ -262,24 +374,17 @@ async fn build_web_spawner(
         bind_addr: config.web.bind_addr.clone(),
         public_url: config.web.public_url.clone(),
         session_secret: config.web.session_secret.clone(),
-        session_ttl: config.web.session_ttl,
-        role_check_refresh: config.web.mod_check_refresh,
     });
 
     let signed_key = twitch_1337_web::state::derive_session_key(&config.web.session_secret)?;
 
-    #[allow(unused_mut)]
-    let mut hidden_admins = config.twitch.hidden_admins.clone();
     #[cfg(feature = "dev-login")]
     {
-        hidden_admins.push(twitch_1337_web::dev::DEV_USER_ID.to_owned());
         tracing::warn!(
             target: "twitch_1337_web",
             "dev-login feature compiled in — /_dev/login mints mod sessions without OAuth (DO NOT SHIP)",
         );
     }
-
-    let owner_id = config.twitch.owner.as_deref().map(Arc::<str>::from);
 
     let state = twitch_1337_web::WebState {
         sessions,
@@ -289,8 +394,6 @@ async fn build_web_spawner(
         clock: web_clock,
         channel: Arc::from(config.twitch.channel.as_str()),
         broadcaster_id: Arc::from(broadcaster.id.as_str()),
-        hidden_admins: Arc::from(hidden_admins.into_boxed_slice()),
-        viewer_allowlist: Arc::from(config.twitch.viewer_allowlist.clone().into_boxed_slice()),
         client_id: config.twitch.client_id.clone(),
         oauth,
         ping_actor,
@@ -301,7 +404,7 @@ async fn build_web_spawner(
         avatar_cache: Arc::new(twitch_1337_web::helix::AvatarCache::new(
             std::time::Duration::from_secs(3600),
         )),
-        owner_id,
+        owner: Arc::new(arc_swap::ArcSwap::from_pointee(config.twitch.owner.clone())),
         settings,
         settings_store,
         ai_bootstrap: config.ai.clone().map(Arc::new),

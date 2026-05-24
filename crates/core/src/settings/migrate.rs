@@ -1,6 +1,7 @@
 //! Migrate a v1 config.toml [ai] block into a v2 AiOverrides patch.
 
 use eyre::Result;
+use humantime::parse_duration;
 
 use super::overrides::*;
 
@@ -122,6 +123,89 @@ pub fn migrate_legacy_ai(root: &toml::Value) -> Result<AiOverrides> {
     Ok(out)
 }
 
+/// Extract every legacy non-secret, non-bootstrap key from a raw config.toml
+/// `Value` and return a sparse `SettingsOverrides` patch suitable for
+/// `SettingsStore::apply`. Pairs with `migrate_legacy_ai` for the `[ai]`
+/// section; this helper covers the v3 migration of `[twitch]`, `[suspend]`,
+/// `[aviationstack]` (non-secret), and `[web]` (non-bootstrap) keys.
+pub fn migrate_legacy_config(root: &toml::Value) -> Result<super::overrides::SettingsOverrides> {
+    let mut out = super::overrides::SettingsOverrides::default();
+
+    if let Some(t) = root.get("twitch").and_then(|v| v.as_table()) {
+        let v = toml::Value::Table(t.clone());
+        out.twitch.expected_latency = v
+            .get("expected_latency")
+            .and_then(toml::Value::as_integer)
+            .and_then(|i| u32::try_from(i).ok());
+        if let Some(arr) = v.get("hidden_admins").and_then(toml::Value::as_array) {
+            out.twitch.hidden_admins = Some(
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect(),
+            );
+        }
+        if let Some(arr) = v.get("viewer_allowlist").and_then(toml::Value::as_array) {
+            out.twitch.viewer_allowlist = Some(
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect(),
+            );
+        }
+        // `owner` is bootstrap-only (config.toml) — not migrated to settings.ron.
+        if let Some(s) = v.get("admin_channel").and_then(toml::Value::as_str) {
+            out.twitch.admin_channel = Some(if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.to_owned())
+            });
+        }
+        if let Some(s) = v.get("ai_channel").and_then(toml::Value::as_str) {
+            out.twitch.ai_channel = Some(if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.to_owned())
+            });
+        }
+    }
+
+    if let Some(t) = root.get("suspend").and_then(|v| v.as_table()) {
+        let v = toml::Value::Table(t.clone());
+        out.suspend.default_duration_secs = v
+            .get("default_duration_secs")
+            .and_then(toml::Value::as_integer)
+            .and_then(|i| u64::try_from(i).ok());
+    }
+
+    if let Some(t) = root.get("aviationstack").and_then(|v| v.as_table()) {
+        let v = toml::Value::Table(t.clone());
+        out.aviationstack.enabled = v.get("enabled").and_then(toml::Value::as_bool);
+        out.aviationstack.base_url = v
+            .get("base_url")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned);
+        out.aviationstack.timeout_secs = v
+            .get("timeout_secs")
+            .and_then(toml::Value::as_integer)
+            .and_then(|i| u64::try_from(i).ok());
+    }
+
+    if let Some(t) = root.get("web").and_then(|v| v.as_table()) {
+        let v = toml::Value::Table(t.clone());
+        out.web.session_ttl_secs = v
+            .get("session_ttl")
+            .and_then(toml::Value::as_str)
+            .and_then(|s| parse_duration(s).ok())
+            .map(|d| d.as_secs());
+        out.web.mod_check_refresh_secs = v
+            .get("mod_check_refresh")
+            .and_then(toml::Value::as_str)
+            .and_then(|s| parse_duration(s).ok())
+            .map(|d| d.as_secs());
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +285,130 @@ mod tests {
             Some(super::super::ai::AiBackendKind::OpenAi)
         );
         assert_eq!(overrides.connection.model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn legacy_twitch_keys_migrate_into_overrides() {
+        let raw = r#"
+            [twitch]
+            channel = "main"
+            username = "bot"
+            refresh_token = "r"
+            client_id = "i"
+            client_secret = "s"
+            expected_latency = 250
+            hidden_admins = ["111", "222"]
+            viewer_allowlist = ["999"]
+            owner = "777"
+            admin_channel = "admins"
+            ai_channel = "ai"
+        "#;
+        let value: toml::Value = toml::from_str(raw).expect("parse");
+        let overrides = migrate_legacy_config(&value).expect("migrate");
+        assert_eq!(overrides.twitch.expected_latency, Some(250));
+        assert_eq!(
+            overrides.twitch.hidden_admins.as_deref(),
+            Some(&vec!["111".to_string(), "222".to_string()][..])
+        );
+        assert_eq!(
+            overrides.twitch.viewer_allowlist.as_deref(),
+            Some(&vec!["999".to_string()][..])
+        );
+        // `owner` is bootstrap-only (config.toml) and is no longer migrated.
+        assert_eq!(overrides.twitch.admin_channel, Some(Some("admins".into())));
+        assert_eq!(overrides.twitch.ai_channel, Some(Some("ai".into())));
+    }
+
+    #[test]
+    fn legacy_twitch_minimal_returns_default() {
+        let raw = r#"
+            [twitch]
+            channel = "main"
+            username = "bot"
+            refresh_token = "r"
+            client_id = "i"
+            client_secret = "s"
+        "#;
+        let value: toml::Value = toml::from_str(raw).expect("parse");
+        let overrides = migrate_legacy_config(&value).expect("migrate");
+        assert_eq!(overrides.twitch, TwitchOverrides::default());
+    }
+
+    #[test]
+    fn legacy_suspend_aviationstack_web_keys_migrate() {
+        let raw = r#"
+            [twitch]
+            channel = "c"
+            username = "u"
+            refresh_token = "r"
+            client_id = "i"
+            client_secret = "s"
+
+            [suspend]
+            default_duration_secs = 900
+
+            [aviationstack]
+            enabled = true
+            api_key = "k"
+            base_url = "https://aviationstack.example/v1"
+            timeout_secs = 7
+
+            [web]
+            enabled = true
+            bind_addr = "127.0.0.1:8080"
+            public_url = "https://bot.example"
+            session_secret = "00112233"
+            session_ttl = "12h"
+            mod_check_refresh = "2m"
+        "#;
+        let value: toml::Value = toml::from_str(raw).expect("parse");
+        let overrides = migrate_legacy_config(&value).expect("migrate");
+        assert_eq!(overrides.suspend.default_duration_secs, Some(900));
+        assert_eq!(overrides.aviationstack.enabled, Some(true));
+        assert_eq!(
+            overrides.aviationstack.base_url.as_deref(),
+            Some("https://aviationstack.example/v1")
+        );
+        assert_eq!(overrides.aviationstack.timeout_secs, Some(7));
+        assert_eq!(overrides.web.session_ttl_secs, Some(12 * 3600));
+        assert_eq!(overrides.web.mod_check_refresh_secs, Some(120));
+    }
+
+    #[test]
+    fn legacy_blank_optional_strings_migrate_as_explicit_clear() {
+        let raw = r#"
+            [twitch]
+            channel = "main"
+            username = "bot"
+            refresh_token = "r"
+            client_id = "i"
+            client_secret = "s"
+            owner = ""
+            admin_channel = "   "
+            ai_channel = ""
+        "#;
+        let value: toml::Value = toml::from_str(raw).expect("parse");
+        let overrides = migrate_legacy_config(&value).expect("migrate");
+        // `owner` is bootstrap-only (config.toml) and is no longer migrated.
+        assert_eq!(overrides.twitch.admin_channel, Some(None));
+        assert_eq!(overrides.twitch.ai_channel, Some(None));
+    }
+
+    #[test]
+    fn legacy_web_invalid_humantime_is_skipped() {
+        let raw = r#"
+            [twitch]
+            channel = "c"
+            username = "u"
+            refresh_token = "r"
+            client_id = "i"
+            client_secret = "s"
+
+            [web]
+            session_ttl = "not-a-duration"
+        "#;
+        let value: toml::Value = toml::from_str(raw).expect("parse");
+        let overrides = migrate_legacy_config(&value).expect("migrate");
+        assert_eq!(overrides.web.session_ttl_secs, None);
     }
 }

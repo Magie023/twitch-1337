@@ -3,9 +3,9 @@
 //! Compiled in only when the `dev-login` Cargo feature is enabled
 //! (`cargo run --features dev-login`, or `just dev`). When present,
 //! `/_dev/login` mints a signed session for [`DEV_USER_ID`] and redirects
-//! to `/pings`, skipping the OAuth round-trip. The bin pushes
-//! [`DEV_USER_ID`] into `hidden_admins` under the same cfg so the
-//! mod-gate shortcut admits the session.
+//! to `/pings`, skipping the OAuth round-trip. The bin populates
+//! `state.owner` with [`DEV_USER_ID`] at construction time so the
+//! owner role-recheck gate admits the session.
 //!
 //! Also exposes [`StubHelix`] — a zero-network HelixClient impl used by
 //! the `web-dev` bin so the dashboard can run from a worktree against

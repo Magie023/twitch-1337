@@ -29,7 +29,7 @@ fn session_round_trips() {
     let clock = Arc::new(StubClock::new(
         Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
     ));
-    let table = SessionTable::new(Duration::from_secs(7 * 24 * 3600), clock.clone());
+    let table = SessionTable::new(clock.clone());
     let (id, _csrf) = table
         .insert(twitch_1337_web::auth::session::NewSession {
             user_id: "12345".into(),
@@ -39,7 +39,9 @@ fn session_round_trips() {
             is_broadcaster: false,
         })
         .expect("insert");
-    let got = table.get_and_touch(&id).expect("present");
+    let got = table
+        .get_and_touch(&id, Duration::from_secs(7 * 24 * 3600))
+        .expect("present");
     assert_eq!(got.user_login, "alice");
     assert_eq!(got.user_id, "12345");
 }
@@ -49,7 +51,7 @@ fn session_expires_after_ttl() {
     let clock = Arc::new(StubClock::new(
         Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
     ));
-    let table = SessionTable::new(Duration::from_secs(60), clock.clone());
+    let table = SessionTable::new(clock.clone());
     let (id, _csrf) = table
         .insert(twitch_1337_web::auth::session::NewSession {
             user_id: "12345".into(),
@@ -61,7 +63,7 @@ fn session_expires_after_ttl() {
         .unwrap();
     clock.advance(61);
     assert!(
-        table.get_and_touch(&id).is_none(),
+        table.get_and_touch(&id, Duration::from_secs(60)).is_none(),
         "expected expiry past TTL"
     );
 }
@@ -71,7 +73,7 @@ fn session_sliding_refresh_keeps_alive() {
     let clock = Arc::new(StubClock::new(
         Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
     ));
-    let table = SessionTable::new(Duration::from_secs(120), clock.clone());
+    let table = SessionTable::new(clock.clone());
     let (id, _csrf) = table
         .insert(twitch_1337_web::auth::session::NewSession {
             user_id: "12345".into(),
@@ -81,13 +83,14 @@ fn session_sliding_refresh_keeps_alive() {
             is_broadcaster: false,
         })
         .unwrap();
+    let ttl = Duration::from_secs(120);
     clock.advance(60);
-    assert!(table.get_and_touch(&id).is_some()); // bumps last_seen
+    assert!(table.get_and_touch(&id, ttl).is_some()); // bumps last_seen
     clock.advance(90);
     assert!(
-        table.get_and_touch(&id).is_some(),
+        table.get_and_touch(&id, ttl).is_some(),
         "sliding refresh should keep alive"
     );
     clock.advance(150);
-    assert!(table.get_and_touch(&id).is_none());
+    assert!(table.get_and_touch(&id, ttl).is_none());
 }

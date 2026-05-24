@@ -1,0 +1,87 @@
+{# crates/web/templates/settings/cards/aviationstack.html #}
+{% import "settings/_macros.html" as m %}
+
+<section id="sec-aviationstack" class="settings-card" data-section="aviationstack">
+  <input type="hidden" name="aviationstack_card_visible" value="1">
+  <header class="settings-card-head">
+    <div>
+      <h2>Aviationstack</h2>
+      <p>Metadata enrichment for flight tracking. All changes require a bot restart.</p>
+    </div>
+    <div class="settings-card-tag">
+      <span class="card-dirty" hidden>0 modified</span>
+    </div>
+  </header>
+  <div class="settings-rows">
+    <div class="settings-row" data-section="aviationstack">
+      <div class="row-left">
+        <div class="row-label"><span class="dirty-dot" aria-hidden="true"></span><code class="row-key">enabled</code><span class="restart-required">restart required</span></div>
+        <div class="row-hint">Enable Aviationstack metadata enrichment for flight lookups.</div>
+      </div>
+      <div class="row-control-cell">
+        <span class="row-pretty" aria-hidden="true" data-pretty-unit="bool">{% if current.aviationstack.enabled %}On{% else %}Off{% endif %}</span>
+        <label class="toggle">
+          <input
+            type="checkbox"
+            name="aviationstack_enabled"
+            value="1"
+            data-default="{{ defaults.aviationstack.enabled }}"
+            data-key="enabled"
+            role="switch"
+            aria-label="enabled"
+            {% if current.aviationstack.enabled %}checked{% endif %}>
+          <span class="toggle-thumb" aria-hidden="true"></span>
+        </label>
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("enabled") %}{% endcall %}
+        <span class="row-default">default <span class="mono">{% if defaults.aviationstack.enabled %}on{% else %}off{% endif %}</span></span>
+      </div>
+    </div>
+    <div class="settings-row" data-section="aviationstack">
+      <div class="row-left">
+        <div class="row-label"><span class="dirty-dot" aria-hidden="true"></span><code class="row-key">base_url</code><span class="restart-required">restart required</span></div>
+        <div class="row-hint">Aviationstack API base URL.</div>
+      </div>
+      <div class="row-control-cell">
+        <span class="row-pretty" aria-hidden="true">{% if current.aviationstack.base_url.is_empty() %}<span class="muted">{{ defaults.aviationstack.base_url }}</span>{% else %}{{ current.aviationstack.base_url }}{% endif %}</span>
+        <input type="text"
+               class="text-input is-wide"
+               name="aviationstack_base_url"
+               value="{{ current.aviationstack.base_url }}"
+               placeholder="{{ defaults.aviationstack.base_url }}"
+               data-default="{{ defaults.aviationstack.base_url }}"
+               data-key="base_url">
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("base_url") %}{% endcall %}
+        <span class="row-default">default <span class="mono">{{ defaults.aviationstack.base_url }}</span></span>
+      </div>
+    </div>
+    <div class="settings-row" data-section="aviationstack">
+      <div class="row-left">
+        <div class="row-label"><span class="dirty-dot" aria-hidden="true"></span><code class="row-key">timeout_secs</code><span class="restart-required">restart required</span></div>
+        <div class="row-hint">Request timeout for Aviationstack API calls.</div>
+      </div>
+      <div class="row-control-cell">
+        <span class="row-pretty" aria-hidden="true" data-pretty-unit="s">{{ current.aviationstack.timeout_secs }} s</span>
+        <div class="num-wrap">
+          <input
+            type="number"
+            class="num-input"
+            name="aviationstack_timeout_secs"
+            min="1"
+            max="120"
+            value="{{ current.aviationstack.timeout_secs }}"
+            data-default="{{ defaults.aviationstack.timeout_secs }}"
+            data-key="timeout_secs">
+          <span class="num-unit">s</span>
+        </div>
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("timeout_secs") %}{% endcall %}
+        <span class="row-default">default <span class="mono">{{ defaults.aviationstack.timeout_secs }}s</span></span>
+      </div>
+    </div>
+  </div>
+</section>

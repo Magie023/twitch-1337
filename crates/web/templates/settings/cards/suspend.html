@@ -1,0 +1,19 @@
+{# crates/web/templates/settings/cards/suspend.html #}
+{% import "settings/_macros.html" as m %}
+
+<section id="sec-suspend" class="settings-card" data-section="suspend">
+  <header class="settings-card-head">
+    <div>
+      <h2>Suspend</h2>
+      <p>Default duration for the <code>!suspend</code> command when no duration is given.</p>
+    </div>
+    <div class="settings-card-tag">
+      <span class="card-dirty" hidden>0 modified</span>
+    </div>
+  </header>
+  <div class="settings-rows">
+    {% call m::num_row_bounded("suspend", "suspend_default_duration_secs", "default_duration_secs",
+       "Default suspension length in seconds (1 s – 7 days).",
+       current.suspend.default_duration_secs, defaults.suspend.default_duration_secs, "s", 1, 604800) %}{% endcall %}
+  </div>
+</section>

@@ -3,6 +3,7 @@ use eyre::Result;
 use twitch_irc::{login::LoginCredentials, transport::Transport};
 
 use crate::ping::PingHandle;
+use crate::settings::SettingsHandle;
 
 use super::{ADMIN_DENIED_MSG, Command, CommandContext, is_admin, normalize_username};
 
@@ -12,15 +13,12 @@ fn normalize_ping_name(name: &str) -> String {
 
 pub struct PingAdminCommand {
     ping: PingHandle,
-    hidden_admin_ids: Vec<String>,
+    settings: SettingsHandle,
 }
 
 impl PingAdminCommand {
-    pub fn new(ping: PingHandle, hidden_admin_ids: Vec<String>) -> Self {
-        Self {
-            ping,
-            hidden_admin_ids,
-        }
+    pub fn new(ping: PingHandle, settings: SettingsHandle) -> Self {
+        Self { ping, settings }
     }
 }
 
@@ -38,7 +36,8 @@ where
         let subcommand = ctx.args.first().copied().unwrap_or("");
         match subcommand {
             "create" | "delete" | "edit" | "add" | "remove" => {
-                if !is_admin(ctx.privmsg, &self.hidden_admin_ids) {
+                let hidden_admins = self.settings.load();
+                if !is_admin(ctx.privmsg, &hidden_admins.twitch.hidden_admins) {
                     ctx.sender.reply(ctx.privmsg, ADMIN_DENIED_MSG).await;
                     return Ok(());
                 }

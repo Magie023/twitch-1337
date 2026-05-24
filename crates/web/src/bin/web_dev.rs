@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
         twitch_1337_core::settings::FileAuditLog::new(data_dir.join("settings_audit.log")),
     );
     let (settings_store, settings_handle) =
-        twitch_1337_core::settings::SettingsStore::open(&data_dir, audit_log)
+        twitch_1337_core::settings::SettingsStore::open(&data_dir, audit_log, &channel)
             .wrap_err("open settings store")?;
 
     let memory_store = MemoryStore::open(&data_dir, settings_handle.clone())
@@ -78,8 +78,7 @@ async fn main() -> Result<()> {
         .wrap_err("open memory store")?;
 
     let clock = Arc::new(SystemClock);
-    let session_ttl = Duration::from_secs(7 * 24 * 3600);
-    let sessions = Arc::new(SessionTable::new(session_ttl, clock.clone()));
+    let sessions = Arc::new(SessionTable::new(clock.clone()));
 
     // Pair with the fixed signed_key below: stable signed cookie across
     // restarts means no re-login when iterating.
@@ -98,8 +97,6 @@ async fn main() -> Result<()> {
         bind_addr: bind_addr.to_string(),
         public_url,
         session_secret,
-        session_ttl,
-        role_check_refresh: Duration::from_secs(300),
     });
 
     let helix: Arc<dyn HelixClient> = Arc::new(StubHelix);
@@ -112,8 +109,6 @@ async fn main() -> Result<()> {
         clock,
         channel: Arc::from(channel.as_str()),
         broadcaster_id: Arc::from("0"),
-        hidden_admins: Arc::from(vec![DEV_USER_ID.to_owned()].into_boxed_slice()),
-        viewer_allowlist: Arc::from(Vec::<String>::new().into_boxed_slice()),
         client_id: SecretString::new("dev-client-id".to_owned().into()),
         oauth,
         ping_actor,
@@ -124,7 +119,12 @@ async fn main() -> Result<()> {
         avatar_cache: Arc::new(twitch_1337_web::helix::AvatarCache::new(
             Duration::from_secs(3600),
         )),
-        owner_id: Some(Arc::from(DEV_USER_ID)),
+        // Inject DEV_USER_ID as the bootstrap owner so the role-recheck gate
+        // admits the dev session. Stored directly in `state.owner` (not
+        // settings.ron) because owner is now bootstrap-only.
+        owner: Arc::new(arc_swap::ArcSwap::from_pointee(Some(
+            DEV_USER_ID.to_owned(),
+        ))),
         settings: settings_handle,
         settings_store,
         ai_bootstrap: None,

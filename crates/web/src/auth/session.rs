@@ -5,6 +5,11 @@
 //! so an active user stays logged in indefinitely. The role-gate middleware
 //! also stamps `last_role_check` so it knows when to re-verify the helix
 //! moderator list.
+//!
+//! The TTL is **not** stored in the table — callers pass it on each
+//! `get_and_touch` call. This allows the session TTL to be read live from
+//! the settings handle so dashboard changes take effect on subsequent
+//! requests without a restart.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -57,15 +62,13 @@ impl Session {
 
 pub struct SessionTable {
     inner: RwLock<HashMap<SessionId, Session>>,
-    ttl: Duration,
     clock: Arc<dyn Clock>,
 }
 
 impl SessionTable {
-    pub fn new(ttl: Duration, clock: Arc<dyn Clock>) -> Self {
+    pub fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
             inner: RwLock::new(HashMap::new()),
-            ttl,
             clock,
         }
     }
@@ -110,9 +113,15 @@ impl SessionTable {
         );
     }
 
-    pub fn get_and_touch(&self, id: &str) -> Option<Session> {
+    /// Check whether the session with `id` is still live under `ttl` and, if
+    /// so, slide its `last_seen` timestamp and return a clone.
+    ///
+    /// `ttl` is passed by the caller on every call so the value is always the
+    /// **current** effective setting — dashboard changes to `session_ttl_secs`
+    /// take effect on the next request without a restart.
+    pub fn get_and_touch(&self, id: &str, ttl: Duration) -> Option<Session> {
         let now = self.clock.now();
-        let ttl = chrono::Duration::from_std(self.ttl).ok()?;
+        let ttl = chrono::Duration::from_std(ttl).ok()?;
         let mut g = self.inner.write().unwrap();
         let session = g.get_mut(id)?;
         if now.signed_duration_since(session.last_seen) > ttl {

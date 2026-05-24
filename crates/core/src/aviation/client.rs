@@ -4,11 +4,10 @@
 use std::time::Duration;
 
 use eyre::{Result, WrapErr as _};
-use secrecy::ExposeSecret as _;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::config::AviationstackConfig;
 use crate::util::APP_USER_AGENT;
 
 use super::location::{
@@ -19,6 +18,16 @@ use super::types::{
     AdsbAircraftResponse, AdsbDbAirlineResponse, AdsbDbResponse, AviationstackFlightMetadata,
     AviationstackFlightsResponse, FlightRoute, NearbyAircraft,
 };
+
+/// Aviation-crate-internal runtime config for the Aviationstack HTTP enrichment
+/// endpoint. `api_key` comes from config.toml bootstrap; `base_url` and
+/// `timeout_secs` come from the dashboard settings store.
+#[derive(Clone)]
+pub(crate) struct AviationstackConfig {
+    pub(crate) api_key: SecretString,
+    pub(crate) base_url: String,
+    pub(crate) timeout_secs: u64,
+}
 
 const ADSBDB_BASE_URL: &str = "https://api.adsbdb.com/v0";
 const ADSBLOL_BASE_URL: &str = "https://api.adsb.lol/v2";
@@ -186,8 +195,22 @@ impl AviationClient {
         ]
     }
 
-    pub fn with_aviationstack_config(mut self, aviationstack: Option<AviationstackConfig>) -> Self {
-        self.aviationstack = aviationstack.filter(|cfg| cfg.enabled);
+    /// Enable Aviationstack flight-metadata enrichment.
+    ///
+    /// `api_key` comes from the bootstrap secret in config.toml.
+    /// `base_url` and `timeout_secs` come from the dashboard settings store.
+    /// Passing `None` for `api_key` disables Aviationstack enrichment.
+    pub fn with_aviationstack(
+        mut self,
+        api_key: Option<SecretString>,
+        base_url: String,
+        timeout_secs: u64,
+    ) -> Self {
+        self.aviationstack = api_key.map(|key| AviationstackConfig {
+            api_key: key,
+            base_url,
+            timeout_secs,
+        });
         self
     }
 

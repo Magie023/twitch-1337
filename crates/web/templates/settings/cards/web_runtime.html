@@ -1,0 +1,22 @@
+{# crates/web/templates/settings/cards/web_runtime.html #}
+{% import "settings/_macros.html" as m %}
+
+<section id="sec-web_runtime" class="settings-card" data-section="web_runtime">
+  <header class="settings-card-head">
+    <div>
+      <h2>Dashboard</h2>
+      <p>Dashboard session lifetime and moderator role re-check interval.</p>
+    </div>
+    <div class="settings-card-tag">
+      <span class="card-dirty" hidden>0 modified</span>
+    </div>
+  </header>
+  <div class="settings-rows">
+    {% call m::num_row_bounded("web_runtime", "web_session_ttl_secs", "session_ttl_secs",
+       "How long a login session stays valid (3 600 s – 30 days).",
+       current.web.session_ttl_secs, defaults.web.session_ttl_secs, "s", 3600, 2592000) %}{% endcall %}
+    {% call m::num_row_bounded("web_runtime", "web_mod_check_refresh_secs", "mod_check_refresh_secs",
+       "How often the dashboard re-checks whether a logged-in user is still a moderator (30 s – 1 h).",
+       current.web.mod_check_refresh_secs, defaults.web.mod_check_refresh_secs, "s", 30, 3600) %}{% endcall %}
+  </div>
+</section>

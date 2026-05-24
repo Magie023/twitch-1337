@@ -105,15 +105,15 @@ pub async fn build_state_with_dirs(helix: Arc<dyn HelixClient>) -> (WebState, Te
     let clock: Arc<dyn Clock> = Arc::new(FixedClock(
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 1, 1, 0, 0, 0).unwrap(),
     ));
-    build_state_inner(helix, Duration::from_secs(300), clock).await
+    build_state_inner(helix, 300, clock).await
 }
 
 /// Like [`build_state_with_dirs`] but lets the caller override the
-/// `role_check_refresh` window.
+/// `mod_check_refresh_secs` window (read live from settings).
 ///
 /// Uses a [`StepClock`] that increments by one second on each `now()` call so
-/// that `elapsed > role_check_refresh` evaluates to `true` even when
-/// `role_check_refresh` is `Duration::ZERO` — the session is inserted at `T0`
+/// that `elapsed > mod_check_refresh` evaluates to `true` even when
+/// `mod_check_refresh_secs` is `0` — the session is inserted at `T0`
 /// and the first middleware check sees `T0 + Ns` where `N ≥ 1`.
 pub async fn build_state_with_overrides(
     helix: Arc<dyn HelixClient>,
@@ -122,7 +122,7 @@ pub async fn build_state_with_overrides(
     let clock: Arc<dyn Clock> = Arc::new(StepClock::new(
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 1, 1, 0, 0, 0).unwrap(),
     ));
-    build_state_inner(helix, role_check_refresh, clock).await
+    build_state_inner(helix, role_check_refresh.as_secs(), clock).await
 }
 
 /// Variant that returns the ping, memory, and settings tempdirs so callers
@@ -134,16 +134,16 @@ pub async fn build_state_with_all_dirs(
     let clock: Arc<dyn Clock> = Arc::new(FixedClock(
         chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 1, 1, 0, 0, 0).unwrap(),
     ));
-    build_state_inner_keep_settings(helix, Duration::from_secs(300), clock).await
+    build_state_inner_keep_settings(helix, 300, clock).await
 }
 
 async fn build_state_inner(
     helix: Arc<dyn HelixClient>,
-    role_check_refresh: Duration,
+    mod_check_refresh_secs: u64,
     clock: Arc<dyn Clock>,
 ) -> (WebState, TempDir, TempDir) {
     let (state, td_p, td_m, td_s) =
-        build_state_inner_keep_settings(helix, role_check_refresh, clock).await;
+        build_state_inner_keep_settings(helix, mod_check_refresh_secs, clock).await;
     // Settings tempdir is intentionally dropped here; helper-driven tests
     // that need the on-disk `settings.ron` to survive should use
     // [`build_state_with_all_dirs`] instead.
@@ -153,7 +153,7 @@ async fn build_state_inner(
 
 async fn build_state_inner_keep_settings(
     helix: Arc<dyn HelixClient>,
-    role_check_refresh: Duration,
+    mod_check_refresh_secs: u64,
     clock: Arc<dyn Clock>,
 ) -> (WebState, TempDir, TempDir, TempDir) {
     let pings_dir = TempDir::new().expect("pings tempdir");
@@ -162,7 +162,7 @@ async fn build_state_inner_keep_settings(
     let (ping_actor_tx, ping_actor_rx, ping_names_tx, _ping_names_rx) = ping_actor_channel_full();
     tokio::spawn(run_ping_actor(ping_actor_rx, pings, ping_names_tx));
     let ping_actor = PingHandle::new((*ping_actor_tx).clone());
-    let sessions = Arc::new(SessionTable::new(Duration::from_secs(7200), clock.clone()));
+    let sessions = Arc::new(SessionTable::new(clock.clone()));
     let oauth = Arc::new(
         OAuthCtx::new(
             "test-client-id",
@@ -175,8 +175,6 @@ async fn build_state_inner_keep_settings(
         bind_addr: "127.0.0.1:0".into(),
         public_url: "https://test.invalid".into(),
         session_secret: SecretString::new("0".repeat(64).into()),
-        session_ttl: Duration::from_secs(7200),
-        role_check_refresh,
     });
     // Tests don't need a real production secret; a fixed 32-byte key keeps
     // signed-cookie round-trips deterministic across reruns.
@@ -187,8 +185,19 @@ async fn build_state_inner_keep_settings(
             settings_dir.path().join("settings_audit.log"),
         ));
     let (settings_store, settings_handle) =
-        twitch_1337_core::settings::SettingsStore::open(settings_dir.path(), audit)
+        twitch_1337_core::settings::SettingsStore::open(settings_dir.path(), audit, "testchannel")
             .expect("open settings store");
+    // Inject web timing values into the live in-memory settings snapshot.
+    // `mod_check_refresh_secs` may be 0 (force-recheck) which is below the
+    // validator's 30 s floor; we write via the raw ArcSwap handle so
+    // validation is bypassed in tests (same pattern as `set_owner`).
+    // `session_ttl_secs` is fixed at 7200 s (2 h) for all tests.
+    {
+        let mut s = (*settings_handle.load_full()).clone();
+        s.web.mod_check_refresh_secs = mod_check_refresh_secs;
+        s.web.session_ttl_secs = 7200;
+        settings_handle.store(std::sync::Arc::new(s));
+    }
     let memory_store = MemoryStore::open(memory_dir.path(), settings_handle.clone())
         .await
         .expect("open memory store");
@@ -200,8 +209,6 @@ async fn build_state_inner_keep_settings(
         clock,
         channel: Arc::from("testchannel"),
         broadcaster_id: Arc::from("100"),
-        hidden_admins: Arc::from(Vec::<String>::new().into_boxed_slice()),
-        viewer_allowlist: Arc::from(Vec::<String>::new().into_boxed_slice()),
         client_id: SecretString::new("test-client-id".to_owned().into()),
         oauth,
         ping_actor,
@@ -212,7 +219,7 @@ async fn build_state_inner_keep_settings(
         avatar_cache: Arc::new(twitch_1337_web::helix::AvatarCache::new(
             Duration::from_secs(3600),
         )),
-        owner_id: None,
+        owner: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
         settings: settings_handle,
         settings_store,
         ai_bootstrap: None,
@@ -286,4 +293,13 @@ pub fn sign_for_tests(state: &WebState, name: &str, value: &str) -> String {
 /// because that's what hits the server in production.
 pub fn cookie_header(signed_sid: &str, signed_csrf: &str) -> String {
     format!("tw1337_sid={signed_sid}; tw1337_csrf={signed_csrf}")
+}
+
+/// Set the owner in `state.owner` (bootstrap owner from config.toml).
+/// `WebState.owner` is `Arc<ArcSwap<Option<String>>>` so this write is
+/// immediately visible to all clones that share the same `Arc`.
+pub fn set_owner(state: &WebState, owner: Option<&str>) {
+    state
+        .owner
+        .store(std::sync::Arc::new(owner.map(str::to_owned)));
 }

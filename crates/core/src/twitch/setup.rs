@@ -52,9 +52,14 @@ pub async fn setup_twitch_client(
 
 /// Connect, join channel(s), and verify authentication via `GlobalUserState`.
 ///
+/// `extra_channels` lists any additional IRC channels to join beyond the
+/// primary channel (e.g. `admin_channel` and `ai_channel` from the settings
+/// store). Pass `&[]` when there are no extras.
+///
 /// Returns `Err` if connection times out (30 s) or authentication fails.
 pub async fn setup_and_verify_twitch_client(
     config: &Configuration,
+    extra_channels: &[String],
 ) -> Result<(
     UnboundedReceiver<ServerMessage>,
     AuthenticatedTwitchClient,
@@ -69,13 +74,11 @@ pub async fn setup_and_verify_twitch_client(
     client.connect().await;
 
     let mut channels: HashSet<String> = [config.twitch.channel.clone()].into();
-    if let Some(ref admin_channel) = config.twitch.admin_channel {
-        debug!(admin_channel = %admin_channel, "Joining admin channel");
-        channels.insert(admin_channel.clone());
-    }
-    if let Some(ref ai_channel) = config.twitch.ai_channel {
-        debug!(ai_channel = %ai_channel, "Joining ai channel");
-        channels.insert(ai_channel.clone());
+    for extra in extra_channels {
+        if !extra.is_empty() {
+            debug!(channel = %extra, "Joining extra channel");
+            channels.insert(extra.clone());
+        }
     }
 
     info!(channels = ?channels, "Setting wanted channels");

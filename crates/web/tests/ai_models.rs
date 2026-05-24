@@ -25,6 +25,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use helpers::{
     FakeHelix, build_state_with_all_dirs, cookie_header, insert_session_as, install_crypto,
+    set_owner,
 };
 
 fn empty_helix() -> Arc<FakeHelix> {
@@ -89,7 +90,7 @@ async fn configure_state(
     }));
     // Fresh cache per test so tests are isolated.
     state.model_cache = Arc::new(ModelListCache::default());
-    state.owner_id = Some(Arc::from("1"));
+    set_owner(state, Some("1"));
 }
 
 #[tokio::test]
@@ -214,8 +215,8 @@ async fn cache_hit_skips_second_upstream_call() {
 #[tokio::test]
 async fn non_owner_is_rejected() {
     install_crypto();
-    let (mut state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
-    state.owner_id = Some(Arc::from("999"));
+    let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    set_owner(&state, Some("999"));
 
     let (sid, csrf, _bare) = insert_session_as(&state, "1", "someone", Role::Mod);
     let app = build_router(state);

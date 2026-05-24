@@ -226,7 +226,7 @@ where
         (None, None)
     };
 
-    let latency_value = Arc::new(AtomicU32::new(config.twitch.expected_latency));
+    let latency_value = Arc::new(AtomicU32::new(settings.load().twitch.expected_latency));
 
     let latency = tokio::spawn({
         let client = client.clone();
@@ -266,6 +266,10 @@ where
         let btx = broadcast_tx.clone();
         let client = client.clone();
         async move {
+            let (admin_channel, ai_channel) = {
+                let s = settings.load();
+                (s.twitch.admin_channel.clone(), s.twitch.ai_channel.clone())
+            };
             run_generic_command_handler(CommandHandlerConfig {
                 broadcast_tx: btx,
                 client,
@@ -275,19 +279,17 @@ where
                 leaderboard,
                 ping_actor_tx,
                 ping_names_rx,
-                hidden_admin_ids: config.twitch.hidden_admins.clone(),
                 settings: settings.clone(),
                 tracker_tx,
                 aviation_client: aviation_for_commands,
                 whisper,
-                admin_channel: config.twitch.admin_channel.clone(),
-                ai_channel: config.twitch.ai_channel.clone(),
+                admin_channel,
+                ai_channel,
                 bot_username: config.twitch.username.clone(),
                 channel: config.twitch.channel.clone(),
                 data_dir: data_dir.clone(),
                 doener: doener.clone(),
                 suspension_manager: suspension_manager.clone(),
-                suspend: config.suspend.clone(),
                 emote_provider,
                 primary_history_tap,
             })

@@ -26,12 +26,23 @@
 
 <div class="settings-grid">
   <aside class="settings-nav" aria-label="Settings sections">
-    <div class="settings-nav-group" data-group="chat">
-      {% call m::nav_group_head("chat", "Chat", 2) %}{% endcall %}
-      <div class="settings-nav-group-body" id="nav-group-body-chat">
+    <div class="settings-nav-group" data-group="commands">
+      {% call m::nav_group_head("commands", "Commands", 3) %}{% endcall %}
+      <div class="settings-nav-group-body" id="nav-group-body-commands">
         <ul class="settings-nav-group-items">
           {% call m::nav_section_item("cooldowns", "cooldowns", "Cooldowns") %}{% endcall %}
           {% call m::nav_section_item("pings", "pings", "Pings") %}{% endcall %}
+          {% call m::nav_section_item("suspend", "suspend", "Suspend") %}{% endcall %}
+        </ul>
+      </div>
+    </div>
+
+    <div class="settings-nav-group" data-group="twitch">
+      {% call m::nav_group_head("twitch", "Twitch", 2) %}{% endcall %}
+      <div class="settings-nav-group-body" id="nav-group-body-twitch">
+        <ul class="settings-nav-group-items">
+          {% call m::nav_section_item("twitch_permissions", "twitch_permissions", "Permissions") %}{% endcall %}
+          {% call m::nav_section_item("twitch_channels", "twitch_channels", "Channels") %}{% endcall %}
         </ul>
       </div>
     </div>
@@ -52,14 +63,36 @@
         </ul>
       </div>
     </div>
+
+    <div class="settings-nav-group" data-group="flight_tracking">
+      {% call m::nav_group_head("flight_tracking", "Flight Tracking", 1) %}{% endcall %}
+      <div class="settings-nav-group-body" id="nav-group-body-flight_tracking">
+        <ul class="settings-nav-group-items">
+          {% call m::nav_section_item("aviationstack", "aviationstack", "Aviationstack") %}{% endcall %}
+        </ul>
+      </div>
+    </div>
+
+    <div class="settings-nav-group" data-group="system">
+      {% call m::nav_group_head("system", "System", 1) %}{% endcall %}
+      <div class="settings-nav-group-body" id="nav-group-body-system">
+        <ul class="settings-nav-group-items">
+          {% call m::nav_section_item("web_runtime", "web_runtime", "Dashboard") %}{% endcall %}
+        </ul>
+      </div>
+    </div>
   </aside>
 
   <div class="settings-main">
     <form id="settings-form" method="post" action="/settings">
       <input type="hidden" name="_csrf" value="{{ csrf }}">
-      <div class="settings-group-divider" data-group="chat"><span>CHAT</span></div>
+      <div class="settings-group-divider" data-group="commands"><span>COMMANDS</span></div>
       {% include "settings/cards/cooldowns.html" %}
       {% include "settings/cards/pings.html" %}
+      {% include "settings/cards/suspend.html" %}
+      <div class="settings-group-divider" data-group="twitch"><span>TWITCH</span></div>
+      {% include "settings/cards/twitch_permissions.html" %}
+      {% include "settings/cards/twitch_channels.html" %}
       <div class="settings-group-divider" data-group="ai"><span>AI</span></div>
       {% include "settings/cards/ai_connection.html" %}
       {% include "settings/cards/ai_behavior.html" %}
@@ -70,6 +103,10 @@
       {% include "settings/cards/ai_web.html" %}
       {% include "settings/cards/ai_emotes.html" %}
       {% include "settings/cards/ai_media.html" %}
+      <div class="settings-group-divider" data-group="flight_tracking"><span>FLIGHT TRACKING</span></div>
+      {% include "settings/cards/aviationstack.html" %}
+      <div class="settings-group-divider" data-group="system"><span>SYSTEM</span></div>
+      {% include "settings/cards/web_runtime.html" %}
     </form>
 
   </div>

@@ -1,0 +1,42 @@
+{# crates/web/templates/settings/cards/twitch_permissions.html #}
+{% import "settings/_macros.html" as m %}
+
+<section id="sec-twitch_permissions" class="settings-card" data-section="twitch_permissions">
+  <header class="settings-card-head">
+    <div>
+      <h2>Twitch · Permissions</h2>
+      <p>Static allowlists for hidden admins and dashboard viewer access. Owner ID is set in <code>config.toml</code>.</p>
+    </div>
+    <div class="settings-card-tag">
+      <span class="card-dirty" hidden>0 modified</span>
+    </div>
+  </header>
+  <div class="settings-rows">
+    <div class="settings-row" data-section="twitch_permissions">
+      <div class="row-left">
+        <div class="row-label"><span class="dirty-dot" aria-hidden="true"></span><code class="row-key">hidden_admins</code></div>
+        <div class="row-hint">Twitch user IDs (one per line). Treated as mods for admin-only commands without requiring mod role.</div>
+      </div>
+      <div class="row-control-cell">
+        <textarea class="text-input is-wide" rows="4" name="twitch_hidden_admins" data-key="hidden_admins" data-default="">{{ current.twitch.hidden_admins.join("\n") }}</textarea>
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("hidden_admins") %}{% endcall %}
+        <span class="row-default">default <span class="mono">(empty)</span></span>
+      </div>
+    </div>
+    <div class="settings-row" data-section="twitch_permissions">
+      <div class="row-left">
+        <div class="row-label"><span class="dirty-dot" aria-hidden="true"></span><code class="row-key">viewer_allowlist</code></div>
+        <div class="row-hint">Twitch user IDs (one per line) granted read-only dashboard access.</div>
+      </div>
+      <div class="row-control-cell">
+        <textarea class="text-input is-wide" rows="4" name="twitch_viewer_allowlist" data-key="viewer_allowlist" data-default="">{{ current.twitch.viewer_allowlist.join("\n") }}</textarea>
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("viewer_allowlist") %}{% endcall %}
+        <span class="row-default">default <span class="mono">(empty)</span></span>
+      </div>
+    </div>
+  </div>
+</section>
