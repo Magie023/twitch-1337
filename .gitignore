@@ -40,7 +40,7 @@ Thumbs.db
 
 token.ron
 schedule_cache.ron
-config.toml
+/config.toml
 leaderboard.ron
 pings.ron
 ai_memory.ron

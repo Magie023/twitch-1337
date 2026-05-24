@@ -6,6 +6,7 @@ members = ["crates/core", "crates/llm", "crates/twitch-1337", "crates/web"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+publish = false
 
 [workspace.dependencies]
 arc-swap = "1.7"

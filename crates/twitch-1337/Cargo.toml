@@ -3,6 +3,7 @@ name = "twitch-1337"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 arc-swap = { workspace = true }
