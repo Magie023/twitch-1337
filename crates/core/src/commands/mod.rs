@@ -40,11 +40,15 @@ pub fn is_admin(privmsg: &PrivmsgMessage, hidden_admin_ids: &[String]) -> bool {
     hidden_admin_ids.contains(&privmsg.sender.id)
 }
 
-/// Normalize a command name from user input: strip leading `!`s and
-/// ASCII-lowercase. Used both by admin suspend commands and by the
-/// dispatcher's suspension lookup — they MUST agree.
+/// Normalize a command name from user input: strip leading `!`s,
+/// ASCII-lowercase, and collapse known command aliases. Used both by admin
+/// suspend commands and by the dispatcher's suspension lookup — they MUST
+/// agree.
 pub fn normalize_command_name(raw: &str) -> String {
-    raw.trim_start_matches('!').to_ascii_lowercase()
+    match raw.trim_start_matches('!').to_ascii_lowercase().as_str() {
+        "döner" => "doener".to_owned(),
+        normalized => normalized.to_owned(),
+    }
 }
 
 /// Normalize a username argument: strip a leading `@` and ASCII-lowercase.
@@ -112,5 +116,6 @@ mod tests {
         assert_eq!(normalize_command_name("!AI"), "ai");
         assert_eq!(normalize_command_name("!!foo"), "foo");
         assert_eq!(normalize_command_name("track"), "track");
+        assert_eq!(normalize_command_name("!döner"), "doener");
     }
 }

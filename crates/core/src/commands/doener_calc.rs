@@ -1,5 +1,6 @@
 //! `!döner` / `!doener` — Zahl in „Anzahl Döner“ umrechnen (Deutschland-Ø nach [Döneratlas](https://doeneratlas.de/)).
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -283,6 +284,10 @@ where
 
     fn matches(&self, word: &str) -> bool {
         matches_doener_trigger(word)
+    }
+
+    fn suspend_key(&self, _trigger: &str) -> Cow<'_, str> {
+        Cow::Borrowed("doener")
     }
 
     async fn execute(&self, ctx: CommandContext<'_, T, L>) -> Result<()> {

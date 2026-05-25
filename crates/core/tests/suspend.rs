@@ -269,6 +269,42 @@ async fn suspending_ai_also_blocks_grok_alias() {
 }
 
 #[tokio::test]
+async fn suspending_doener_blocks_umlaut_alias() {
+    let mut bot = TestBotBuilder::new().spawn().await;
+
+    bot.send_as_broadcaster("broadcaster", "!suspend doener 1m")
+        .await;
+    let confirm = bot.expect_say(Duration::from_secs(2)).await;
+    assert!(
+        confirm.contains("!doener") && confirm.contains("gesperrt"),
+        "expected suspend confirmation, got: {confirm}"
+    );
+
+    bot.send("alice", "!döner 10").await;
+    bot.expect_silent(Duration::from_millis(500)).await;
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
+async fn suspending_umlaut_doener_blocks_ascii_alias() {
+    let mut bot = TestBotBuilder::new().spawn().await;
+
+    bot.send_as_broadcaster("broadcaster", "!suspend döner 1m")
+        .await;
+    let confirm = bot.expect_say(Duration::from_secs(2)).await;
+    assert!(
+        confirm.contains("!doener") && confirm.contains("gesperrt"),
+        "expected canonical suspend confirmation, got: {confirm}"
+    );
+
+    bot.send("alice", "!doener 10").await;
+    bot.expect_silent(Duration::from_millis(500)).await;
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
 async fn ping_can_be_suspended() {
     let mut bot = TestBotBuilder::new().spawn().await;
 
