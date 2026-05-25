@@ -919,6 +919,9 @@ async fn save(
             web_mod_check_refresh_secs: form.web_mod_check_refresh_secs,
         }
         .into_overrides(),
+        // Schedules are managed via the dedicated /schedules CRUD endpoint;
+        // the settings form must not overwrite them.
+        schedules: None,
     };
 
     let actor = Actor {

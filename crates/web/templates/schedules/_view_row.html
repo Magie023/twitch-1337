@@ -1,0 +1,15 @@
+<div class="schedule-view">
+  <div class="schedule-meta">
+    <strong>{{ row.name }}</strong>
+    <span class="badge {% if row.enabled %}on{% else %}off{% endif %}">{% if row.enabled %}enabled{% else %}disabled{% endif %}</span>
+    <span class="muted">every {{ row.interval }}</span>
+  </div>
+  <p class="schedule-message">{{ row.message }}</p>
+  <div class="schedule-actions">
+    <a class="btn" href="/schedules?edit={{ row.name|urlencode }}">Edit</a>
+    <form method="post" action="/schedules/{{ row.name|urlencode }}/delete" class="js-delete-schedule" data-name="{{ row.name }}" style="display: inline">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <button type="submit" class="btn danger">Delete</button>
+    </form>
+  </div>
+</div>

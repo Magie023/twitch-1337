@@ -14,6 +14,7 @@ pub mod audit;
 pub mod aviationstack;
 pub mod migrate;
 pub mod overrides;
+pub mod schedules;
 pub mod store;
 pub mod suspend;
 pub mod twitch;
@@ -28,6 +29,7 @@ pub use audit::MemoryAuditLog;
 pub use audit::{AuditChange, AuditEntry, AuditError, AuditLog, FileAuditLog};
 pub use aviationstack::AviationstackSettings;
 pub use overrides::{AiOverrides, CooldownsOverrides, PingsOverrides, SettingsOverrides};
+pub use schedules::ScheduleSettings;
 pub use store::{Actor, SettingsStore};
 pub use suspend::SuspendSettings;
 pub use twitch::TwitchRuntime;
@@ -53,6 +55,7 @@ pub struct Settings {
     pub aviationstack: AviationstackSettings,
     pub suspend: SuspendSettings,
     pub web: WebRuntime,
+    pub schedules: Vec<ScheduleSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +91,7 @@ pub enum SettingsSection {
     Aviationstack,
     Suspend,
     WebRuntime,
+    Schedules,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +146,7 @@ impl Settings {
             aviationstack: AviationstackSettings::default(),
             suspend: SuspendSettings::default(),
             web: WebRuntime::default(),
+            schedules: Vec::new(),
         }
     }
 
@@ -268,6 +273,117 @@ impl Settings {
                 ),
             });
         }
+        // Schedules
+        let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (idx, sc) in self.schedules.iter().enumerate() {
+            let prefix = format!("schedules[{idx}]");
+            if sc.name.trim().is_empty() {
+                errs.push(FieldError {
+                    field: format!("{prefix}.name"),
+                    message: "must not be blank".into(),
+                });
+            } else if !seen_names.insert(sc.name.trim()) {
+                errs.push(FieldError {
+                    field: format!("{prefix}.name"),
+                    message: format!("duplicate name {:?}", sc.name.trim()),
+                });
+            }
+            if !sc.name.trim().is_empty() {
+                let bad: Vec<char> = sc
+                    .name
+                    .chars()
+                    .filter(|c| {
+                        // URL-reserved or query-decoded chars that break the
+                        // dashboard's /schedules/<name>/edit + ?edit=<name>
+                        // routes, plus ASCII control chars (log injection,
+                        // IRC framing). PR #227 review F6 + F9.
+                        matches!(
+                            c,
+                            '/' | '?' | '#' | '%' | '&' | '+' | '=' | ' ' | '\'' | '"'
+                        ) || c.is_control()
+                    })
+                    .collect();
+                if !bad.is_empty() {
+                    errs.push(FieldError {
+                        field: format!("{prefix}.name"),
+                        message: format!(
+                            "must not contain URL-reserved, whitespace, quote, or control characters {bad:?}"
+                        ),
+                    });
+                }
+            }
+            if sc.message.trim().is_empty() {
+                errs.push(FieldError {
+                    field: format!("{prefix}.message"),
+                    message: "must not be blank".into(),
+                });
+            }
+            match crate::database::Schedule::parse_interval(&sc.interval) {
+                Ok(d) if d.num_seconds() <= 0 => {
+                    errs.push(FieldError {
+                        field: format!("{prefix}.interval"),
+                        message: format!("must be > 0 (got {:?})", sc.interval),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => errs.push(FieldError {
+                    field: format!("{prefix}.interval"),
+                    message: format!("invalid: {e}"),
+                }),
+            }
+            for (field, val) in [
+                ("start_date", sc.start_date.as_deref()),
+                ("end_date", sc.end_date.as_deref()),
+            ] {
+                if let Some(v) = val
+                    && chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M:%S").is_err()
+                {
+                    errs.push(FieldError {
+                        field: format!("{prefix}.{field}"),
+                        message: format!("must be YYYY-MM-DDTHH:MM:SS (got {v:?})"),
+                    });
+                }
+            }
+            for (field, val) in [
+                ("active_time_start", sc.active_time_start.as_deref()),
+                ("active_time_end", sc.active_time_end.as_deref()),
+            ] {
+                if let Some(v) = val
+                    && chrono::NaiveTime::parse_from_str(v, "%H:%M").is_err()
+                {
+                    errs.push(FieldError {
+                        field: format!("{prefix}.{field}"),
+                        message: format!("must be HH:MM (got {v:?})"),
+                    });
+                }
+            }
+            match (
+                sc.active_time_start.as_deref(),
+                sc.active_time_end.as_deref(),
+            ) {
+                (Some(_), None) => errs.push(FieldError {
+                    field: format!("{prefix}.active_time_end"),
+                    message: "must be set when active_time_start is set".into(),
+                }),
+                (None, Some(_)) => errs.push(FieldError {
+                    field: format!("{prefix}.active_time_start"),
+                    message: "must be set when active_time_end is set".into(),
+                }),
+                _ => {}
+            }
+            if let (Some(sd), Some(ed)) = (sc.start_date.as_deref(), sc.end_date.as_deref())
+                && let (Ok(s), Ok(e)) = (
+                    chrono::NaiveDateTime::parse_from_str(sd, "%Y-%m-%dT%H:%M:%S"),
+                    chrono::NaiveDateTime::parse_from_str(ed, "%Y-%m-%dT%H:%M:%S"),
+                )
+                && e <= s
+            {
+                errs.push(FieldError {
+                    field: format!("{prefix}.end_date"),
+                    message: format!("must be after start_date (start={sd}, end={ed})"),
+                });
+            }
+        }
         if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 
@@ -347,6 +463,10 @@ impl Settings {
                     .mod_check_refresh_secs
                     .unwrap_or(defaults.web.mod_check_refresh_secs),
             },
+            schedules: overrides
+                .schedules
+                .clone()
+                .unwrap_or_else(|| defaults.schedules.clone()),
         }
     }
 }
@@ -810,6 +930,7 @@ mod resolve_tests {
         assert_eq!(s.aviationstack, AviationstackSettings::default());
         assert_eq!(s.suspend, SuspendSettings::default());
         assert_eq!(s.web, WebRuntime::default());
+        assert!(s.schedules.is_empty());
     }
 
     #[test]
@@ -1107,5 +1228,235 @@ mod resolve_tests {
             })
             .expect_err("must fail");
         assert!(errs.iter().any(|e| e.field == "web.session_ttl_secs"));
+    }
+
+    #[test]
+    fn schedules_default_is_empty_vec() {
+        let s = Settings::compiled_defaults();
+        assert!(s.schedules.is_empty());
+    }
+
+    #[test]
+    fn schedules_override_wholesale_replaces() {
+        use crate::settings::ScheduleSettings;
+        let defaults = Settings::compiled_defaults();
+        let overrides = overrides::SettingsOverrides {
+            schedules: Some(vec![ScheduleSettings {
+                name: "noon".into(),
+                message: "hi".into(),
+                interval: "01:00".into(),
+                enabled: true,
+                ..Default::default()
+            }]),
+            ..overrides::SettingsOverrides::default()
+        };
+        let r = Settings::resolve(&defaults, &overrides);
+        assert_eq!(r.schedules.len(), 1);
+        assert_eq!(r.schedules[0].name, "noon");
+    }
+
+    #[test]
+    fn schedules_none_override_resolves_to_defaults() {
+        let defaults = Settings::compiled_defaults();
+        let overrides = overrides::SettingsOverrides::default();
+        let r = Settings::resolve(&defaults, &overrides);
+        assert!(r.schedules.is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_schedule_name() {
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![
+            ScheduleSettings {
+                name: "a".into(),
+                message: "hi".into(),
+                interval: "01:00".into(),
+                enabled: true,
+                ..Default::default()
+            },
+            ScheduleSettings {
+                name: "a".into(),
+                message: "hi".into(),
+                interval: "01:00".into(),
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("duplicate name must fail");
+        assert!(errs.iter().any(|e| e.field.starts_with("schedules[")));
+    }
+
+    #[test]
+    fn validate_rejects_bad_interval() {
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![ScheduleSettings {
+            name: "x".into(),
+            message: "hi".into(),
+            interval: "not-a-duration".into(),
+            enabled: true,
+            ..Default::default()
+        }];
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("bad interval must fail");
+        assert!(errs.iter().any(|e| e.field == "schedules[0].interval"));
+    }
+
+    #[test]
+    fn validate_rejects_single_active_time_field() {
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![ScheduleSettings {
+            name: "x".into(),
+            message: "hi".into(),
+            interval: "01:00".into(),
+            active_time_start: Some("09:00".into()),
+            active_time_end: None,
+            enabled: true,
+            ..Default::default()
+        }];
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("orphan active_time_start must fail");
+        assert!(
+            errs.iter()
+                .any(|e| e.field == "schedules[0].active_time_end")
+        );
+    }
+
+    #[test]
+    fn validate_accepts_disabled_schedule_even_if_malformed_dates() {
+        // Disabled rows still need a parseable interval (cheapest invariant
+        // to keep the dashboard's add-form honest), but optional date strings
+        // are not validated.
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![ScheduleSettings {
+            name: "x".into(),
+            message: "hi".into(),
+            interval: "01:00".into(),
+            enabled: false,
+            ..Default::default()
+        }];
+        s.validate(&ValidationContext {
+            channel: "test".into(),
+        })
+        .expect("disabled schedule with valid required fields must pass");
+    }
+
+    #[test]
+    fn validate_empty_schedules_is_ok() {
+        let s = Settings::compiled_defaults();
+        s.validate(&ValidationContext {
+            channel: "test".into(),
+        })
+        .expect("empty schedules must pass");
+    }
+
+    #[test]
+    fn validate_rejects_end_date_before_start_date() {
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![ScheduleSettings {
+            name: "x".into(),
+            message: "hi".into(),
+            interval: "01:00".into(),
+            start_date: Some("2027-01-01T00:00:00".into()),
+            end_date: Some("2026-01-01T00:00:00".into()),
+            enabled: true,
+            ..Default::default()
+        }];
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("inverted date range must fail");
+        assert!(errs.iter().any(|e| e.field == "schedules[0].end_date"));
+    }
+
+    #[test]
+    fn validate_rejects_schedule_name_with_slash() {
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![ScheduleSettings {
+            name: "morning/evening".into(),
+            message: "hi".into(),
+            interval: "01:00".into(),
+            enabled: true,
+            ..Default::default()
+        }];
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("slash in name must fail");
+        assert!(errs.iter().any(|e| e.field == "schedules[0].name"));
+    }
+
+    #[test]
+    fn validate_rejects_schedule_name_with_ampersand() {
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![ScheduleSettings {
+            name: "foo&bar".into(),
+            message: "m".into(),
+            interval: "01:00".into(),
+            enabled: true,
+            ..Default::default()
+        }];
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("should fail");
+        assert!(errs.iter().any(|e| e.field == "schedules[0].name"));
+    }
+
+    #[test]
+    fn validate_rejects_schedule_name_with_space() {
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![ScheduleSettings {
+            name: "foo bar".into(),
+            message: "m".into(),
+            interval: "01:00".into(),
+            enabled: true,
+            ..Default::default()
+        }];
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("should fail");
+        assert!(errs.iter().any(|e| e.field == "schedules[0].name"));
+    }
+
+    #[test]
+    fn validate_rejects_schedule_name_with_control_char() {
+        use crate::settings::ScheduleSettings;
+        let mut s = Settings::compiled_defaults();
+        s.schedules = vec![ScheduleSettings {
+            name: "foo\nbar".into(),
+            message: "m".into(),
+            interval: "01:00".into(),
+            enabled: true,
+            ..Default::default()
+        }];
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("should fail");
+        assert!(errs.iter().any(|e| e.field == "schedules[0].name"));
     }
 }

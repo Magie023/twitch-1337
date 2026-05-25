@@ -46,29 +46,9 @@ client_secret = "your_client_secret"
 # [ai]
 # api_key = "sk-or-your_api_key"
 
-# Optional: Scheduled messages configuration
-# Add [[schedules]] sections to define scheduled messages.
-# The bot watches config.toml for changes and reloads schedules automatically.
-#
-# Example schedule (uncomment to use):
-#
-# [[schedules]]
-# name = "hydration"
-# message = "Stay hydrated! DinkDonk"
-# interval = "00:30"  # Post every 30 minutes (hh:mm format)
-# enabled = true
-#
-# [[schedules]]
-# name = "stream-reminder"
-# message = "Don't forget to follow!"
-# interval = "01:00"  # Post every hour
-# # Optional: Only post during specific dates
-# start_date = "2026-01-01T00:00:00"  # ISO 8601 format
-# end_date = "2026-12-31T23:59:59"
-# # Optional: Only post during specific daily time window (Europe/Berlin)
-# active_time_start = "18:00"  # HH:MM format
-# active_time_end = "23:00"
-# enabled = true
+# Schedules now live in the dashboard at /schedules.
+# settings.ron stores the canonical list; legacy [[schedules]] in this
+# file are ignored on every boot after the first.
 
 # [web]                            # uncomment to enable the dashboard
 # enabled = true

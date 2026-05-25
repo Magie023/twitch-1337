@@ -10,7 +10,7 @@ publish = false
 
 [workspace.dependencies]
 arc-swap = "1.7"
-askama = { version = "0.16" }
+askama = { version = "0.16", features = ["urlencode"] }
 async-trait = "0.1.89"
 axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "query", "tokio", "tower-log", "tracing"] }
 base64 = "0.22"
@@ -24,7 +24,6 @@ futures-util = "0.3"
 hex = "0.4"
 humantime-serde = "1"
 infer = { version = "0.19", default-features = false }
-notify-debouncer-mini = "0.7"
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
 rand = "0.10.1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }

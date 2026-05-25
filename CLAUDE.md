@@ -106,7 +106,7 @@ them current.
 
 ## Config
 
-`config.toml` (copy `config.toml.example`). Bootstrap sections only: `[twitch]` (secrets + channel/username), `[ai]` (api_key only, optional), `[[schedules]]` (optional, repeatable), `[aviationstack]` (api_key only, optional), `[web]` (bootstrap fields only). Schema + defaults in `config.toml.example` — treat as source of truth. Everything else lives in `settings.ron` managed via the dashboard.
+`config.toml` (copy `config.toml.example`). Bootstrap sections only: `[twitch]` (secrets + channel/username), `[ai]` (api_key only, optional), `[aviationstack]` (api_key only, optional), `[web]` (bootstrap fields only). Schema + defaults in `config.toml.example` — treat as source of truth. Everything else lives in `settings.ron` managed via the dashboard.
 
 `[twitch]` holds OAuth credentials (`refresh_token`, `client_id`, `client_secret`), `channel`, `username`, and `owner` (optional Twitch user ID with full dashboard access). `owner` is bootstrap-only and lives here because it gates the settings page — it must not be editable from the thing it controls. Permission lists (`hidden_admins`, `viewer_allowlist`), channel pointers (`admin_channel`, `ai_channel`), and `expected_latency` live in `settings.ron`, managed via `/settings → Twitch · Permissions` and `Twitch · Channels`. `admin_channel` and `ai_channel` changes require a bot restart. Mods always pass the dashboard auth check; `viewer_allowlist` grants read-only access to non-mods.
 
@@ -133,6 +133,16 @@ On first v3 launch, `[twitch]` permission/channel keys and `[aviationstack]`/`[s
 non-secret keys are migrated into `settings.ron` once (sentinel: `$DATA_DIR/.config_migrated_v3`);
 subsequent edits to those legacy keys in config.toml are ignored.
 
+Schedules live in `settings.ron`, managed via `/schedules` (mod-gated). Each
+row carries name, message, hh:mm interval, optional ISO 8601 date range, optional
+HH:MM active-time window, and an enabled toggle. Validation runs on save
+(unique non-blank names, parseable interval, paired active-time fields).
+Changes apply within ~30s via a `SettingsHandle` change-`Notify` signal that
+the `ScheduleCache` sync task subscribes to. On first launch any legacy
+`[[schedules]]` in config.toml are migrated into `settings.ron` once
+(separate sentinel: `$DATA_DIR/.schedules_migrated_v3`); subsequent edits to
+the legacy section are ignored.
+
 Backend and connection `base_url` changes from the dashboard require a
 bot restart (UI shows a "restart required" badge). Everything else
 applies live via `SettingsHandle` (model, timeout, reasoning_effort,
@@ -140,8 +150,6 @@ behavior limits, history caps, memory byte budgets, dreamer schedule,
 web tools, emotes, media). The `GET /settings/ai/models` endpoint
 proxies upstream `/v1/models` (OpenAI) or `/api/tags` (Ollama) with a
 5-minute TTL cache so the model picker can autocomplete.
-
-Schedules hot-reload on save (2s debounce via notify-debouncer-mini). No restart.
 
 OAuth credentials + AI API key wrapped in `SecretString` (secrecy crate). Config structs are `Deserialize`-only; do NOT add `Serialize` derive (closes credential-leak via debug dump).
 
@@ -166,7 +174,7 @@ Atomic persistence pattern: write tmp + rename. See `ping.rs`, `memory.rs`, `fli
 - Latency monitor: PING/PONG every 5min, EMA alpha=0.2, shared `Arc<AtomicU32>`. Read by 1337 handler for precise wake-up.
 - Flight tracker: `Arc<mpsc::Sender<TrackerCommand>>` from commands to long task. Adaptive poll 30/60/120s based on phase mix. adsb.lol v2; fallback aggregators in memory `reference_adsb_aggregators.md`.
 - AI memory (v2): per-user character sheets + chat LORE + bot SOUL as markdown under $DATA_DIR/memories/. Single-loop !ai turn drives the model with write_file/write_state/delete_state tools (run_agent in the llm crate); the model's final assistant text is sent to chat verbatim. Daily dreamer ritual rewrites files from yesterday's transcript at the dashboard-configured `ai.dreamer.run_at` (Berlin local). Memory bodies are byte-capped (SOUL/user 4 KiB, LORE 12 KiB, state 2 KiB by default; tunable via the dashboard `AI · Memory` card).
-- Scheduled messages: on Ctrl+C, main notifies `Arc<Notify>`; children finish in-flight `say()` then exit; main awaits handler with 5s timeout.
+- Scheduled messages: list loaded from `settings.ron` into `ScheduleCache`; the `run_schedule_settings_sync` task subscribes to `SettingsStore`'s change-`Notify` and updates the cache when the dashboard saves. The message handler polls the cache every 30s. On Ctrl+C, main notifies `Arc<Notify>`; children finish in-flight `say()` then exit; main awaits handler with 5s timeout.
 
 ## Gotchas
 

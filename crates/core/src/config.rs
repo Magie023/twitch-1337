@@ -8,8 +8,6 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use tracing::info;
 
-use crate::database;
-
 /// Bootstrap-only Twitch configuration. Only the fields required to connect
 /// to Twitch IRC and authenticate belong here. Runtime knobs (expected_latency,
 /// hidden_admins, viewer_allowlist, admin_channel, ai_channel) live in
@@ -42,34 +40,6 @@ pub struct AviationstackBootstrap {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AiBootstrap {
     pub api_key: SecretString,
-}
-
-fn default_enabled() -> bool {
-    true
-}
-
-/// Configuration for a scheduled message loaded from config.toml.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ScheduleConfig {
-    pub name: String,
-    pub message: String,
-    /// Interval in "hh:mm" format (e.g., "01:30" for 1 hour 30 minutes)
-    pub interval: String,
-    /// Start date in ISO 8601 format (YYYY-MM-DDTHH:MM:SS)
-    #[serde(default)]
-    pub start_date: Option<String>,
-    /// End date in ISO 8601 format (YYYY-MM-DDTHH:MM:SS)
-    #[serde(default)]
-    pub end_date: Option<String>,
-    /// Daily active time start in HH:MM format
-    #[serde(default)]
-    pub active_time_start: Option<String>,
-    /// Daily active time end in HH:MM format
-    #[serde(default)]
-    pub active_time_end: Option<String>,
-    /// Whether the schedule is enabled (default: true)
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,8 +81,6 @@ pub struct Configuration {
     #[serde(default)]
     pub ai: Option<AiBootstrap>,
     #[serde(default)]
-    pub schedules: Vec<ScheduleConfig>,
-    #[serde(default)]
     pub web: WebConfig,
 }
 
@@ -133,7 +101,6 @@ impl Configuration {
             },
             aviationstack: None,
             ai: None,
-            schedules: Vec::new(),
             web: WebConfig::default(),
         }
     }
@@ -192,21 +159,6 @@ pub fn validate_config(config: &Configuration) -> Result<()> {
         && ai.api_key.expose_secret().trim().is_empty()
     {
         bail!("ai.api_key cannot be empty");
-    }
-
-    for schedule in &config.schedules {
-        if schedule.name.trim().is_empty() {
-            bail!("Schedule name cannot be empty");
-        }
-        if schedule.message.trim().is_empty() {
-            bail!("Schedule '{}' message cannot be empty", schedule.name);
-        }
-        if schedule.interval.trim().is_empty() {
-            bail!("Schedule '{}' interval cannot be empty", schedule.name);
-        }
-        database::Schedule::parse_interval(&schedule.interval).wrap_err_with(|| {
-            format!("Schedule '{}' has invalid interval format", schedule.name)
-        })?;
     }
 
     if config.web.enabled {

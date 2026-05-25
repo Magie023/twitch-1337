@@ -181,7 +181,7 @@ where
         whisper,
         data_dir,
         settings,
-        settings_store: _,
+        settings_store,
         emote_glossary_override,
         irc_connected,
         web_spawner,
@@ -200,8 +200,6 @@ where
     // Clone the sender out of the Arc for SpawnDeps.
     let ping_actor_tx_inner = (*ping_actor_tx).clone();
     let aviation_tracker_tx_inner = aviation_tracker_tx.as_ref().map(|a| (**a).clone());
-
-    let schedules_enabled = !config.schedules.is_empty();
 
     let suspension_manager = Arc::new(suspend::SuspensionManager::new());
 
@@ -272,6 +270,7 @@ where
         emote_provider,
         irc_connected: irc_connected.clone(),
         settings: settings.clone(),
+        settings_store,
         primary_history_tap,
     });
 
@@ -297,16 +296,10 @@ where
         tracing::info!("Daily AI memory dreamer ritual spawned (live settings)");
     }
 
-    if schedules_enabled {
-        info!(
-            "Bot running with continuous connection. Handlers: Config watcher, 1337 tracker, Generic commands, Scheduled messages, Latency monitor, Flight tracker"
-        );
-        info!("Scheduled messages: Loaded from config.toml, reloads on file change");
-    } else {
-        info!(
-            "Bot running with continuous connection. Handlers: 1337 tracker, Generic commands, Latency monitor, Flight tracker"
-        );
-    }
+    info!(
+        "Bot running with continuous connection. Handlers: 1337 tracker, \
+         Generic commands, Scheduled messages, Latency monitor, Flight tracker"
+    );
     info!(
         "1337 tracker scheduled to run daily at {}:{:02} (Europe/Berlin)",
         TARGET_HOUR,

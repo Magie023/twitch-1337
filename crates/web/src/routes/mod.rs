@@ -11,6 +11,7 @@ pub mod health;
 pub mod leaderboard;
 pub mod memory;
 pub mod pings;
+pub mod schedules;
 pub mod settings;
 pub mod stubs;
 

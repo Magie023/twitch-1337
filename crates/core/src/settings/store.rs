@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use chrono::Utc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tracing::{error, info, warn};
 
 use super::audit::{AuditChange, AuditEntry, AuditLog, berlin_now};
 use super::overrides::SettingsOverrides;
-use super::{Settings, SettingsError, SettingsHandle, SettingsSection};
+use super::{ScheduleSettings, Settings, SettingsError, SettingsHandle, SettingsSection};
 
 const FILE_NAME: &str = "settings.ron";
 
@@ -27,6 +27,7 @@ pub struct SettingsStore {
     handle: SettingsHandle,
     audit: Arc<dyn AuditLog>,
     write_lock: Mutex<()>,
+    change_notify: Arc<Notify>,
     boot_channel: String,
 }
 
@@ -61,6 +62,7 @@ impl SettingsStore {
                 handle: handle.clone(),
                 audit,
                 write_lock: Mutex::new(()),
+                change_notify: Arc::new(Notify::new()),
                 boot_channel: boot_channel.to_owned(),
             });
             return Ok((store, handle));
@@ -72,6 +74,7 @@ impl SettingsStore {
             handle: handle.clone(),
             audit,
             write_lock: Mutex::new(()),
+            change_notify: Arc::new(Notify::new()),
             boot_channel: boot_channel.to_owned(),
         });
         info!("settings store opened");
@@ -80,6 +83,10 @@ impl SettingsStore {
 
     pub fn handle(&self) -> &SettingsHandle {
         &self.handle
+    }
+
+    pub fn change_notify(&self) -> Arc<Notify> {
+        self.change_notify.clone()
     }
 
     pub fn defaults(&self) -> &Settings {
@@ -116,6 +123,49 @@ impl SettingsStore {
                 error!(error = ?e, "audit append failed");
             }
         }
+        // Notify unconditionally even on a no-op write: idempotent reload is
+        // cheap, and skipping based on diff_changes would couple change
+        // notifications to the audit-log diff logic.
+        self.change_notify.notify_waiters();
+        Ok(resolved)
+    }
+
+    /// Read-modify-write inside the store's write_lock. The closure receives
+    /// `&mut SettingsOverrides` (the freshly loaded overrides) and may mutate
+    /// any section. The store re-resolves, validates, persists, and notifies
+    /// exactly as `apply` does — but the snapshot the closure sees cannot be
+    /// stale (PR #227 review F4: prevents lost-update races on concurrent
+    /// /schedules CRUD POSTs).
+    pub async fn apply_with<F>(&self, mutate: F, actor: Actor) -> Result<Settings, SettingsError>
+    where
+        F: FnOnce(&mut SettingsOverrides),
+    {
+        let _g = self.write_lock.lock().await;
+        let mut current = load_overrides_async(&self.path).await?.unwrap_or_default();
+        let prior_resolved = Settings::resolve(&self.defaults, &current);
+        mutate(&mut current);
+        let resolved = Settings::resolve(&self.defaults, &current);
+        let ctx = super::ValidationContext {
+            channel: self.boot_channel.clone(),
+        };
+        if let Err(errs) = resolved.validate(&ctx) {
+            return Err(SettingsError::Validation(errs));
+        }
+        crate::util::persist::atomic_save_ron_async(&current, &self.path).await?;
+        self.handle.store(Arc::new(resolved.clone()));
+        let changes = diff_changes(&prior_resolved, &resolved);
+        if !changes.is_empty() {
+            let entry = AuditEntry {
+                ts: berlin_now(Utc::now()),
+                actor_id: actor.user_id,
+                actor_login: actor.user_login,
+                changes,
+            };
+            if let Err(e) = self.audit.append(&entry) {
+                error!(error = ?e, "audit append failed");
+            }
+        }
+        self.change_notify.notify_waiters();
         Ok(resolved)
     }
 
@@ -153,6 +203,7 @@ impl SettingsStore {
             SettingsSection::Aviationstack => current.aviationstack = Default::default(),
             SettingsSection::Suspend => current.suspend = Default::default(),
             SettingsSection::WebRuntime => current.web = Default::default(),
+            SettingsSection::Schedules => current.schedules = None,
         }
         let resolved = Settings::resolve(&self.defaults, &current);
         crate::util::persist::atomic_save_ron_async(&current, &self.path).await?;
@@ -169,6 +220,10 @@ impl SettingsStore {
                 error!(error = ?e, "audit append failed");
             }
         }
+        // Notify unconditionally even on a no-op write: idempotent reload is
+        // cheap, and skipping based on diff_changes would couple change
+        // notifications to the audit-log diff logic.
+        self.change_notify.notify_waiters();
         Ok(resolved)
     }
 }
@@ -422,6 +477,10 @@ fn merge_into(into: &mut SettingsOverrides, patch: &SettingsOverrides) {
     }
     if let Some(v) = patch.web.mod_check_refresh_secs {
         into.web.mod_check_refresh_secs = Some(v);
+    }
+    // Schedules — wholesale replace
+    if patch.schedules.is_some() {
+        into.schedules = patch.schedules.clone();
     }
 }
 
@@ -758,6 +817,40 @@ fn diff_changes(prior: &Settings, next: &Settings) -> Vec<AuditChange> {
         prior.web.mod_check_refresh_secs,
         next.web.mod_check_refresh_secs
     );
+    // Schedules — diff by name across vec
+    {
+        use std::collections::{BTreeMap, BTreeSet};
+        let prior_map: BTreeMap<&str, &ScheduleSettings> = prior
+            .schedules
+            .iter()
+            .map(|s| (s.name.as_str(), s))
+            .collect();
+        let next_map: BTreeMap<&str, &ScheduleSettings> = next
+            .schedules
+            .iter()
+            .map(|s| (s.name.as_str(), s))
+            .collect();
+        let all_names: BTreeSet<&str> = prior_map
+            .keys()
+            .copied()
+            .chain(next_map.keys().copied())
+            .collect();
+        for name in all_names {
+            let p = prior_map.get(name).copied();
+            let n = next_map.get(name).copied();
+            if p != n {
+                out.push(AuditChange {
+                    key: format!("schedules.{name}"),
+                    old: p
+                        .map(|s| serde_json::to_value(s).expect("serialize prior schedule"))
+                        .unwrap_or(serde_json::Value::Null),
+                    new: n
+                        .map(|s| serde_json::to_value(s).expect("serialize next schedule"))
+                        .unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -953,6 +1046,182 @@ mod tests {
         assert!(keys.contains(&"ai.dreamer.service_tier"), "got {keys:?}");
     }
 
+    #[tokio::test]
+    async fn reset_schedules_clears_override() {
+        use crate::settings::ScheduleSettings;
+        let dir = tempfile::tempdir().expect("tmp");
+        let audit = std::sync::Arc::new(crate::settings::audit::MemoryAuditLog::default());
+        let (store, _h) = SettingsStore::open(dir.path(), audit, "main").expect("open");
+        store
+            .apply(
+                SettingsOverrides {
+                    schedules: Some(vec![ScheduleSettings {
+                        name: "x".into(),
+                        message: "hi".into(),
+                        interval: "01:00".into(),
+                        enabled: true,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                },
+                Actor {
+                    user_id: "owner".into(),
+                    user_login: "owner".into(),
+                },
+            )
+            .await
+            .expect("apply");
+        let s = store
+            .reset(
+                SettingsSection::Schedules,
+                Actor {
+                    user_id: "owner".into(),
+                    user_login: "owner".into(),
+                },
+            )
+            .await
+            .expect("reset");
+        assert!(s.schedules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_signals_change_notify() {
+        let (_dir, store, _handle, _log) = fixture();
+        let notify = store.change_notify();
+        let mut notified = Box::pin(notify.notified());
+        // `enable()` registers the waker before the trigger so the wake-up
+        // cannot be lost to a race with notify_waiters().
+        notified.as_mut().enable();
+        let patch = SettingsOverrides {
+            cooldowns: CooldownsOverrides {
+                ai: Some(15),
+                ..Default::default()
+            },
+            ..SettingsOverrides::default()
+        };
+        store
+            .apply(
+                patch,
+                Actor {
+                    user_id: "1".into(),
+                    user_login: "tester".into(),
+                },
+            )
+            .await
+            .expect("apply");
+        tokio::time::timeout(std::time::Duration::from_millis(500), notified)
+            .await
+            .expect("apply must notify change waiters within 500ms");
+    }
+
+    #[tokio::test]
+    async fn reset_signals_change_notify() {
+        let (_dir, store, _handle, _log) = fixture();
+        // Seed a non-default cooldowns override so reset has something to clear.
+        store
+            .apply(
+                SettingsOverrides {
+                    cooldowns: CooldownsOverrides {
+                        ai: Some(15),
+                        ..Default::default()
+                    },
+                    ..SettingsOverrides::default()
+                },
+                Actor {
+                    user_id: "1".into(),
+                    user_login: "tester".into(),
+                },
+            )
+            .await
+            .expect("apply");
+        let notify = store.change_notify();
+        let mut notified = Box::pin(notify.notified());
+        notified.as_mut().enable();
+        store
+            .reset(
+                SettingsSection::Cooldowns,
+                Actor {
+                    user_id: "1".into(),
+                    user_login: "tester".into(),
+                },
+            )
+            .await
+            .expect("reset");
+        tokio::time::timeout(std::time::Duration::from_millis(500), notified)
+            .await
+            .expect("reset must notify change waiters within 500ms");
+    }
+
+    #[tokio::test]
+    async fn concurrent_apply_with_does_not_lose_updates() {
+        use crate::settings::Actor;
+        use crate::settings::audit::MemoryAuditLog;
+        let dir = tempfile::tempdir().expect("tmp");
+        let audit = Arc::new(MemoryAuditLog::default());
+        let (store, _h) = SettingsStore::open(dir.path(), audit, "main").expect("open");
+
+        let store_a = store.clone();
+        let store_b = store.clone();
+
+        let task_a = tokio::spawn(async move {
+            store_a
+                .apply_with(
+                    |o| {
+                        let mut next = o.schedules.clone().unwrap_or_default();
+                        next.push(crate::settings::ScheduleSettings {
+                            name: "alpha".into(),
+                            message: "a".into(),
+                            interval: "01:00".into(),
+                            enabled: true,
+                            ..Default::default()
+                        });
+                        o.schedules = Some(next);
+                    },
+                    Actor {
+                        user_id: "1".into(),
+                        user_login: "a".into(),
+                    },
+                )
+                .await
+                .expect("apply_with a");
+        });
+        let task_b = tokio::spawn(async move {
+            store_b
+                .apply_with(
+                    |o| {
+                        let mut next = o.schedules.clone().unwrap_or_default();
+                        next.push(crate::settings::ScheduleSettings {
+                            name: "bravo".into(),
+                            message: "b".into(),
+                            interval: "01:00".into(),
+                            enabled: true,
+                            ..Default::default()
+                        });
+                        o.schedules = Some(next);
+                    },
+                    Actor {
+                        user_id: "2".into(),
+                        user_login: "b".into(),
+                    },
+                )
+                .await
+                .expect("apply_with b");
+        });
+        let _ = tokio::join!(task_a, task_b);
+
+        let final_resolved = store.handle().load();
+        let names: std::collections::BTreeSet<&str> = final_resolved
+            .schedules
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from(["alpha", "bravo"]),
+            "both concurrent adds must survive — neither clobbers the other"
+        );
+    }
+
     #[test]
     fn diff_emits_twitch_section_changes() {
         let prior = Settings::compiled_defaults();
@@ -975,6 +1244,7 @@ mod tests {
 #[cfg(test)]
 mod merge_tests {
     use super::*;
+    use crate::settings::ScheduleSettings;
     use crate::settings::overrides::{
         AviationstackOverrides, SuspendOverrides, TwitchOverrides, WebRuntimeOverrides,
     };
@@ -1097,5 +1367,91 @@ mod merge_tests {
             s.twitch.expected_latency, 300,
             "TwitchChannels reset must not wipe expected_latency"
         );
+    }
+
+    #[test]
+    fn merge_replaces_schedules_wholesale() {
+        let mut into = SettingsOverrides::default();
+        into.schedules = Some(vec![ScheduleSettings {
+            name: "old".into(),
+            ..Default::default()
+        }]);
+        let patch = SettingsOverrides {
+            schedules: Some(vec![
+                ScheduleSettings {
+                    name: "new1".into(),
+                    ..Default::default()
+                },
+                ScheduleSettings {
+                    name: "new2".into(),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        merge_into(&mut into, &patch);
+        let v = into.schedules.expect("Some");
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].name, "new1");
+        assert_eq!(v[1].name, "new2");
+    }
+
+    #[test]
+    fn merge_skips_schedules_when_patch_is_none() {
+        let mut into = SettingsOverrides {
+            schedules: Some(vec![ScheduleSettings {
+                name: "keep".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let patch = SettingsOverrides::default();
+        merge_into(&mut into, &patch);
+        let v = into.schedules.expect("Some");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "keep");
+    }
+
+    #[test]
+    fn diff_emits_schedule_added_removed_modified() {
+        let mut prior = Settings::compiled_defaults();
+        let mut next = Settings::compiled_defaults();
+        prior.schedules = vec![
+            ScheduleSettings {
+                name: "keep".into(),
+                message: "old".into(),
+                interval: "01:00".into(),
+                enabled: true,
+                ..Default::default()
+            },
+            ScheduleSettings {
+                name: "drop".into(),
+                message: "x".into(),
+                interval: "01:00".into(),
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+        next.schedules = vec![
+            ScheduleSettings {
+                name: "keep".into(),
+                message: "new".into(), // modified
+                interval: "01:00".into(),
+                enabled: true,
+                ..Default::default()
+            },
+            ScheduleSettings {
+                name: "add".into(),
+                message: "y".into(),
+                interval: "01:00".into(),
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+        let changes = diff_changes(&prior, &next);
+        let keys: Vec<&str> = changes.iter().map(|c| c.key.as_str()).collect();
+        assert!(keys.contains(&"schedules.keep"), "got {keys:?}");
+        assert!(keys.contains(&"schedules.drop"), "got {keys:?}");
+        assert!(keys.contains(&"schedules.add"), "got {keys:?}");
     }
 }

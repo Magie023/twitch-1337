@@ -22,14 +22,6 @@ struct StubMeta {
     nav: &'static str,
 }
 
-const SCHEDULES: StubMeta = StubMeta {
-    title: "Schedules",
-    subtitle: "Recurring announcements fired by the bot on a wall-clock schedule.",
-    slug: "schedules",
-    note: "Schedules currently live in config.toml and hot-reload on save. A web editor is on the roadmap.",
-    nav: crate::nav::SCHEDULES,
-};
-
 const LOGS: StubMeta = StubMeta {
     title: "Logs",
     subtitle: "Live event tail across handlers — 1337 pings, AI turns, dreamer rituals.",
@@ -39,9 +31,7 @@ const LOGS: StubMeta = StubMeta {
 };
 
 pub fn router() -> Router<WebState> {
-    Router::new()
-        .route("/schedules", get(|s| render_stub(SCHEDULES, s)))
-        .route("/logs", get(|s| render_stub(LOGS, s)))
+    Router::new().route("/logs", get(|s| render_stub(LOGS, s)))
 }
 
 #[derive(Template)]

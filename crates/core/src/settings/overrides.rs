@@ -28,6 +28,8 @@ pub struct SettingsOverrides {
     pub suspend: SuspendOverrides,
     #[serde(default)]
     pub web: WebRuntimeOverrides,
+    #[serde(default)]
+    pub schedules: Option<Vec<crate::settings::ScheduleSettings>>,
 }
 
 fn default_schema_version() -> u32 {
@@ -45,6 +47,7 @@ impl Default for SettingsOverrides {
             aviationstack: AviationstackOverrides::default(),
             suspend: SuspendOverrides::default(),
             web: WebRuntimeOverrides::default(),
+            schedules: None,
         }
     }
 }

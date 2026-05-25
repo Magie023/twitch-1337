@@ -1,0 +1,98 @@
+{# crates/web/templates/schedules/index.html #}
+{% extends "base.html" %}
+{% block title %}Schedules — twitch-1337{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Schedules</h1>
+    <p class="page-sub">Recurring announcements fired by the bot at a fixed interval. Changes apply within ~30 seconds — no restart needed.</p>
+  </div>
+</div>
+
+{% if let Some(msg) = flash %}<div class="flash">{{ msg }}</div>{% endif %}
+
+{% if !row_errors.is_empty() || !global_errors.is_empty() %}
+  <div class="flash error">
+    <strong>Validation failed.</strong>
+    <ul>
+      {% for err in row_errors %}
+        <li>
+          <code>row {{ err.row_index }}{% if !err.row_name.is_empty() %} ({{ err.row_name }}){% endif %}.{{ err.field }}</code>:
+          {{ err.message }}
+        </li>
+      {% endfor %}
+      {% for (field, msg) in global_errors %}
+        <li><code>{{ field }}</code>: {{ msg }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+<section class="settings-card">
+  <header class="settings-card-head">
+    <div>
+      <h2>Add schedule</h2>
+      <p>Name and message are required. Interval is <code>hh:mm</code>.</p>
+    </div>
+  </header>
+  <form method="post" action="/schedules/add" class="settings-rows">
+    <input type="hidden" name="_csrf" value="{{ csrf }}">
+    <div class="row"><label>Name <input type="text" name="name" required></label></div>
+    <div class="row"><label>Message <input type="text" name="message" required></label></div>
+    <div class="row"><label>Interval (hh:mm) <input type="text" name="interval" placeholder="01:00" required></label></div>
+    <div class="row"><label>Start date (optional, YYYY-MM-DDTHH:MM:SS) <input type="text" name="start_date"></label></div>
+    <div class="row"><label>End date (optional) <input type="text" name="end_date"></label></div>
+    <div class="row"><label>Active time start (optional, HH:MM) <input type="text" name="active_time_start"></label></div>
+    <div class="row"><label>Active time end (optional, HH:MM) <input type="text" name="active_time_end"></label></div>
+    <div class="row"><label><input type="checkbox" name="enabled" value="true" checked> Enabled</label></div>
+    <div class="row"><button type="submit" class="btn primary">Add</button></div>
+  </form>
+</section>
+
+<section class="settings-card">
+  <header class="settings-card-head"><div><h2>Existing schedules</h2></div></header>
+  {% if rows.is_empty() %}
+    <p class="empty">No schedules configured.</p>
+  {% else %}
+    <ul class="schedules-list">
+    {% for row in rows %}
+      <li class="schedule-row">
+        {% if let Some(name) = edit_name %}{% if name.as_str() == row.name.as_str() %}
+        <form method="post" action="/schedules/{{ row.name|urlencode }}/edit" class="settings-rows">
+          <input type="hidden" name="_csrf" value="{{ csrf }}">
+          <div class="row"><label>Name <input type="text" name="name" value="{{ row.name }}" required></label></div>
+          <div class="row"><label>Message <input type="text" name="message" value="{{ row.message }}" required></label></div>
+          <div class="row"><label>Interval <input type="text" name="interval" value="{{ row.interval }}" required></label></div>
+          <div class="row"><label>Start date <input type="text" name="start_date" value="{{ row.start_date.as_deref().unwrap_or("") }}"></label></div>
+          <div class="row"><label>End date <input type="text" name="end_date" value="{{ row.end_date.as_deref().unwrap_or("") }}"></label></div>
+          <div class="row"><label>Active time start <input type="text" name="active_time_start" value="{{ row.active_time_start.as_deref().unwrap_or("") }}"></label></div>
+          <div class="row"><label>Active time end <input type="text" name="active_time_end" value="{{ row.active_time_end.as_deref().unwrap_or("") }}"></label></div>
+          <div class="row"><label><input type="checkbox" name="enabled" value="true" {% if row.enabled %}checked{% endif %}> Enabled</label></div>
+          <div class="row">
+            <button type="submit" class="btn primary">Save</button>
+            <a class="btn ghost" href="/schedules">Cancel</a>
+          </div>
+        </form>
+        {% else %}{% include "schedules/_view_row.html" %}{% endif %}{% else %}
+          {% include "schedules/_view_row.html" %}
+        {% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+  {% endif %}
+</section>
+<script>
+  // Bind delete-confirm via JS so the schedule name lives in a textContent /
+  // dataset context (no HTML-attribute → JS-string parser decoding pitfall).
+  // PR #227 review F3.
+  document.querySelectorAll('form.js-delete-schedule').forEach(function (form) {
+    form.addEventListener('submit', function (event) {
+      var name = form.dataset.name || '';
+      if (!window.confirm('Delete schedule ' + name + '?')) {
+        event.preventDefault();
+      }
+    });
+  });
+</script>
+{% endblock %}

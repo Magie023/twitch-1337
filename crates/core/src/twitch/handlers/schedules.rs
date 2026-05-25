@@ -1,246 +1,63 @@
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
-use color_eyre::eyre::{Result, WrapErr};
-use tracing::{debug, error, info, instrument, warn};
+use tokio::sync::{Notify, RwLock};
+use tracing::{debug, info, instrument, warn};
 use twitch_irc::{login::LoginCredentials, transport::Transport};
 
-use crate::{
-    config::Configuration, database, get_config_path, twitch::ChatSender, util::clock::Clock,
-};
+use crate::database;
+use crate::settings::{SettingsHandle, SettingsStore};
+use crate::twitch::ChatSender;
+use crate::util::clock::Clock;
 
-/// Parse a datetime string in ISO 8601 format (YYYY-MM-DDTHH:MM:SS).
-pub(crate) fn parse_datetime(s: &str) -> Result<chrono::NaiveDateTime> {
-    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").wrap_err_with(|| {
-        format!(
-            "Invalid datetime format '{}' (expected YYYY-MM-DDTHH:MM:SS)",
-            s
-        )
-    })
-}
-
-/// Parse a time string in HH:MM format.
-pub(crate) fn parse_time(s: &str) -> Result<chrono::NaiveTime> {
-    chrono::NaiveTime::parse_from_str(s, "%H:%M")
-        .wrap_err_with(|| format!("Invalid time format '{}' (expected HH:MM)", s))
-}
-
-/// Convert a ScheduleConfig from config.toml into a database::Schedule.
-pub(crate) fn schedule_config_to_schedule(
-    config: &crate::config::ScheduleConfig,
-) -> Result<database::Schedule> {
-    let interval = database::Schedule::parse_interval(&config.interval)?;
-
-    let start_date = config
-        .start_date
-        .as_ref()
-        .map(|s| parse_datetime(s))
-        .transpose()?;
-
-    let end_date = config
-        .end_date
-        .as_ref()
-        .map(|s| parse_datetime(s))
-        .transpose()?;
-
-    let active_time_start = config
-        .active_time_start
-        .as_ref()
-        .map(|s| parse_time(s))
-        .transpose()?;
-
-    let active_time_end = config
-        .active_time_end
-        .as_ref()
-        .map(|s| parse_time(s))
-        .transpose()?;
-
-    let schedule = database::Schedule {
-        name: config.name.clone(),
-        start_date,
-        end_date,
-        active_time_start,
-        active_time_end,
-        interval,
-        message: config.message.clone(),
-    };
-
-    schedule.validate()?;
-
-    Ok(schedule)
-}
-
-/// Load schedules from the Configuration struct.
-/// Filters out disabled schedules and validates all enabled ones.
-pub fn load_schedules_from_config(config: &Configuration) -> Vec<database::Schedule> {
-    let mut schedules = Vec::new();
-
-    for schedule_config in &config.schedules {
-        if !schedule_config.enabled {
-            debug!(schedule = %schedule_config.name, "Skipping disabled schedule");
-            continue;
-        }
-
-        match schedule_config_to_schedule(schedule_config) {
-            Ok(schedule) => schedules.push(schedule),
-            Err(e) => {
-                error!(
-                    schedule = %schedule_config.name,
-                    error = ?e,
-                    "Failed to parse schedule config, skipping"
-                );
+/// Subscribe to `SettingsStore`'s change `Notify` and regenerate the
+/// `ScheduleCache` whenever the schedules vec resolves to a different list
+/// than the cache currently holds. Initial population also happens on the
+/// first iteration: the task primes the cache once at start before waiting
+/// to guarantee we don't miss an apply that races our subscription.
+#[instrument(skip(settings, store, cache, shutdown))]
+pub async fn run_schedule_settings_sync(
+    settings: SettingsHandle,
+    store: Arc<SettingsStore>,
+    cache: Arc<RwLock<database::ScheduleCache>>,
+    shutdown: Arc<Notify>,
+) {
+    info!("Schedule settings sync task started");
+    let change = store.change_notify();
+    // Prime the cache once before waiting so the initial state matches
+    // whatever was loaded at startup.
+    regenerate(&settings, &cache).await;
+    loop {
+        // Pre-register the Notified future BEFORE entering regenerate() so a
+        // notify_waiters() fired during regenerate() is captured rather than
+        // dropped. tokio::sync::Notify only wakes futures that are already
+        // polled or explicitly enabled — without enable(), a wakeup that
+        // races our subscription is silently lost (PR #227 review F1).
+        let mut notified = Box::pin(change.notified());
+        notified.as_mut().enable();
+        tokio::select! {
+            () = &mut notified => {
+                regenerate(&settings, &cache).await;
+            }
+            () = shutdown.notified() => {
+                info!("Schedule settings sync: shutdown received");
+                return;
             }
         }
     }
-
-    schedules
 }
 
-/// Reload configuration from config.toml and extract schedules.
-/// Returns None if config cannot be loaded or parsed.
-pub(crate) fn reload_schedules_from_config() -> Option<Vec<database::Schedule>> {
-    let config_path = get_config_path();
-    let data = match std::fs::read_to_string(&config_path) {
-        Ok(data) => data,
-        Err(e) => {
-            error!(error = ?e, path = %config_path.display(), "Failed to read config for reload");
-            return None;
-        }
-    };
-
-    let config: Configuration = match toml::from_str(&data) {
-        Ok(config) => config,
-        Err(e) => {
-            error!(error = ?e, path = %config_path.display(), "Failed to parse config for reload");
-            return None;
-        }
-    };
-
-    Some(load_schedules_from_config(&config))
-}
-
-/// Config file watcher service that monitors config.toml for changes.
-/// Uses notify-debouncer-mini with 2 second debounce to avoid rapid reloads.
-#[instrument(skip(cache))]
-pub async fn run_config_watcher_service(cache: Arc<tokio::sync::RwLock<database::ScheduleCache>>) {
-    use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
-    use std::time::Duration as StdDuration;
-
-    info!("Config watcher service started");
-
-    // Create channel for receiving file change events
-    let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-
-    // Get absolute path to config file for watching
-    let config_path = match std::fs::canonicalize(get_config_path()) {
-        Ok(p) => p,
-        Err(e) => {
-            error!(error = ?e, "Failed to get absolute path for config.toml");
-            return;
-        }
-    };
-
-    // Held until this function returns; drop wakes the blocking thread.
-    // `spawn_blocking` drop does NOT unpark threads — explicit signal required.
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    // Spawn blocking task for the file watcher (notify is sync)
-    let watcher_config_path = config_path.clone();
-    let mut watcher_handle = tokio::task::spawn_blocking(move || {
-        let tx = tx;
-        let config_path = watcher_config_path;
-        let filter_path = config_path.clone();
-
-        // Create debouncer with 2 second timeout
-        let mut debouncer = match new_debouncer(
-            StdDuration::from_secs(2),
-            move |res: Result<
-                Vec<notify_debouncer_mini::DebouncedEvent>,
-                notify_debouncer_mini::notify::Error,
-            >| {
-                match res {
-                    Ok(events) => {
-                        for event in events {
-                            // Only forward events for config.toml; ignore token.ron etc.
-                            if event.path != filter_path {
-                                continue;
-                            }
-                            debug!(path = ?event.path, "File change event received");
-                            // Use blocking_send since we're in a sync context
-                            if tx.blocking_send(()).is_err() {
-                                // Channel closed, watcher should stop
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = ?e, "File watcher error");
-                    }
-                }
-            },
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                error!(error = ?e, "Failed to create file watcher");
-                return;
-            }
-        };
-
-        // Watch the config file's parent directory
-        let watch_path = config_path.parent().unwrap_or(Path::new("."));
-        if let Err(e) = debouncer
-            .watcher()
-            .watch(watch_path, RecursiveMode::NonRecursive)
-        {
-            error!(error = ?e, path = ?watch_path, "Failed to watch config directory");
-            return;
-        }
-
-        info!(path = ?watch_path, "Watching for config changes");
-
-        let _ = shutdown_rx.blocking_recv();
-    });
-
-    // Track mtime to skip spurious events (notify 8.x subscribes to IN_OPEN, so reading
-    // config.toml in the reload handler triggers another event 2s later without this guard).
-    let mut last_config_mtime: Option<std::time::SystemTime> = None;
-
-    // Main loop: handle file change events
-    loop {
-        tokio::select! {
-            Some(()) = rx.recv() => {
-                let current_mtime = tokio::fs::metadata(&config_path)
-                    .await
-                    .and_then(|m| m.modified())
-                    .ok();
-
-                if current_mtime.is_some() && current_mtime == last_config_mtime {
-                    debug!("Config event ignored: mtime unchanged (spurious IN_OPEN/IN_ATTRIB)");
-                    continue;
-                }
-                last_config_mtime = current_mtime;
-
-                info!("Config file changed, reloading schedules");
-
-                if let Some(schedules) = reload_schedules_from_config() {
-                    let mut cache_guard = cache.write().await;
-                    let old_count = cache_guard.schedules.len();
-                    cache_guard.update(schedules);
-
-                    info!(
-                        old_count,
-                        new_count = cache_guard.schedules.len(),
-                        version = cache_guard.version,
-                        "Schedules reloaded from config"
-                    );
-                } else {
-                    warn!("Failed to reload config, keeping existing schedules");
-                }
-            }
-            _ = &mut watcher_handle => {
-                error!("File watcher task exited unexpectedly");
-                break;
-            }
-        }
+async fn regenerate(settings: &SettingsHandle, cache: &Arc<RwLock<database::ScheduleCache>>) {
+    let new_list = crate::settings::schedules::build_schedules(&settings.load().schedules);
+    let mut g = cache.write().await;
+    if g.schedules != new_list {
+        let old_count = g.schedules.len();
+        g.update(new_list);
+        info!(
+            old_count,
+            new_count = g.schedules.len(),
+            version = g.version,
+            "Schedules updated from settings"
+        );
     }
 }
 
@@ -431,5 +248,171 @@ pub async fn run_scheduled_message_handler<T, L>(
 
             info!(active_tasks = running_tasks.len(), "Task update complete");
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::{Notify, RwLock};
+
+    use crate::database;
+    use crate::settings::{
+        Actor, FileAuditLog, ScheduleSettings, SettingsStore, audit::MemoryAuditLog,
+        overrides::SettingsOverrides,
+    };
+
+    #[tokio::test]
+    async fn settings_apply_bumps_schedule_cache() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let audit = Arc::new(MemoryAuditLog::default());
+        let (store, settings_handle) =
+            SettingsStore::open(dir.path(), audit, "main").expect("open");
+        let cache = Arc::new(RwLock::new(database::ScheduleCache::new()));
+        let shutdown = Arc::new(Notify::new());
+
+        let cache_for_task = cache.clone();
+        let store_for_task = store.clone();
+        let shutdown_for_task = shutdown.clone();
+        let handle_for_task = settings_handle.clone();
+        let task = tokio::spawn(async move {
+            super::run_schedule_settings_sync(
+                handle_for_task,
+                store_for_task,
+                cache_for_task,
+                shutdown_for_task,
+            )
+            .await;
+        });
+
+        // Yield so the sync task subscribes before we apply.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        store
+            .apply(
+                SettingsOverrides {
+                    schedules: Some(vec![ScheduleSettings {
+                        name: "noon".into(),
+                        message: "hi".into(),
+                        interval: "01:00".into(),
+                        enabled: true,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                },
+                Actor {
+                    user_id: "1".into(),
+                    user_login: "tester".into(),
+                },
+            )
+            .await
+            .expect("apply");
+
+        // Poll the cache up to 1s for version > 0 + 1 schedule. (The sync
+        // task wakes via Notify, processes synchronously, then loops; this
+        // should be well under 50ms in practice.)
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            {
+                let g = cache.read().await;
+                if g.version > 0 && g.schedules.len() == 1 {
+                    assert_eq!(g.schedules[0].name, "noon");
+                    break;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                let g = cache.read().await;
+                panic!(
+                    "cache did not update within 1s; version={}, len={}",
+                    g.version,
+                    g.schedules.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
+        let _ = FileAuditLog::new(dir.path().join("settings_audit.log")); // unused, silences import lint
+    }
+
+    /// Race regression: fires `notify_waiters()` while the sync task's
+    /// regenerate() is mid-flight. Pre-fix, the second wakeup was dropped
+    /// because the next `change.notified()` future hadn't been polled yet.
+    #[tokio::test]
+    async fn settings_apply_during_regenerate_is_not_lost() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let audit = Arc::new(MemoryAuditLog::default());
+        let (store, settings_handle) =
+            SettingsStore::open(dir.path(), audit, "main").expect("open");
+        let cache = Arc::new(RwLock::new(database::ScheduleCache::new()));
+        let shutdown = Arc::new(Notify::new());
+
+        let cache_for_task = cache.clone();
+        let store_for_task = store.clone();
+        let shutdown_for_task = shutdown.clone();
+        let handle_for_task = settings_handle.clone();
+        let task = tokio::spawn(async move {
+            super::run_schedule_settings_sync(
+                handle_for_task,
+                store_for_task,
+                cache_for_task,
+                shutdown_for_task,
+            )
+            .await;
+        });
+
+        // Give the sync task time to register its first notified() waiter.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Burst two applies back-to-back. The second fires while the task
+        // is regenerating from the first; the wakeup must not be lost.
+        for (i, name) in [(1usize, "one"), (2, "two")] {
+            store
+                .apply(
+                    SettingsOverrides {
+                        schedules: Some(vec![ScheduleSettings {
+                            name: name.into(),
+                            message: "hi".into(),
+                            interval: "01:00".into(),
+                            enabled: true,
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    },
+                    Actor {
+                        user_id: format!("{i}"),
+                        user_login: "tester".into(),
+                    },
+                )
+                .await
+                .expect("apply");
+        }
+
+        // Cache must converge to the *second* apply's content within 1s.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            {
+                let g = cache.read().await;
+                if g.schedules.len() == 1 && g.schedules[0].name == "two" {
+                    break;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                let g = cache.read().await;
+                panic!(
+                    "cache did not converge to second apply within 1s; \
+                     version={}, schedules={:?}",
+                    g.version,
+                    g.schedules.iter().map(|s| &s.name).collect::<Vec<_>>()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        shutdown.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
     }
 }
