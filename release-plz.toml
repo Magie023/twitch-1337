@@ -4,8 +4,10 @@
 # Branch name for the release PR, matches the repo's `<prefix>/<slug>` policy.
 pr_branch_prefix = "release/"
 # Not a published crate — use git tags as the source of truth and skip
-# `cargo publish` entirely.
+# `cargo publish` entirely. `publish = false` aligns with Cargo.toml's
+# `publish = false` so release-plz doesn't refuse the run on mismatch.
 git_only = true
+publish = false
 # Dependabot owns dependency bumps; don't churn the release PR.
 dependencies_update = false
 # Cargo semver-checks is irrelevant for a binary workspace.
