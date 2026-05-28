@@ -34,6 +34,12 @@ FROM base AS builder
 ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
 
+# Build-arg: monotonic build number (GitHub Actions run number). Surfaced
+# in the dashboard sidebar and startup log so the operator can see which
+# CI run produced the running image. Defaults to "dev" for local builds.
+ARG BUILD_NUM=dev
+ENV BUILD_NUM=${BUILD_NUM}
+
 # Copy over cached dependencies
 COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo

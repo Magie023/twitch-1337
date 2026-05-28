@@ -1,0 +1,22 @@
+name: GHCR retention
+
+on:
+  schedule:
+    - cron: '0 4 * * 0'  # Sundays 04:00 UTC, after data-refresh at 03:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55  # v5.0.0
+        with:
+          package-name: twitch-1337
+          package-type: container
+          min-versions-to-keep: 30
+          delete-only-untagged-versions: false

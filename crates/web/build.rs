@@ -38,6 +38,15 @@ fn git_sha() -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
+/// Resolve the build's CI run number. Docker builds get it via the
+/// `BUILD_NUM` build-arg; local cargo runs fall back to "dev".
+fn build_num() -> String {
+    env::var("BUILD_NUM")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "dev".to_owned())
+}
+
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     for name in ["app.css", "app.js", "htmx.min.js", "favicon.svg"] {
@@ -52,4 +61,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GIT_SHA");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
+
+    println!("cargo:rustc-env=BUILD_NUM={}", build_num());
+    println!("cargo:rerun-if-env-changed=BUILD_NUM");
 }

@@ -47,9 +47,11 @@ Linear history required, force-push + delete blocked, conversations must resolve
 | `zizmor (workflows)` | sast.yml | Workflow security (injection, perms, pinning) |
 | `gitleaks (secrets)` | sast.yml | Full-history secret scan |
 
-`Docker` (build + push `ghcr.io/chronophylos/twitch-1337:vX.Y.Z`, `X.Y`, `latest`)
-triggers on `v*` tag push. Tags are created manually — no per-commit images.
-Not a required check.
+`Docker` (build + push `ghcr.io/chronophylos/twitch-1337:latest` and
+`:b<run_number>`) triggers on push to `main` with paths-ignore for
+docs. Not a required check.
+`GHCR retention` runs Sundays 04:00 UTC; prunes old image versions
+keeping the last 30 plus `:latest`. Not a required check.
 `Data refresh` runs Sundays 03:00 UTC; opens a `chore/data-refresh` PR.
 
 **Native GitHub security (repo settings):** secret_scanning, push_protection,
@@ -62,24 +64,33 @@ both tag AND sha256 digest in Dockerfile.
 
 **Action pinning:** security-critical actions pinned to **commit SHA** with version
 comment: `rustsec/audit-check`, `gitleaks/gitleaks-action`, `zizmorcore/zizmor-action`,
-`aquasecurity/trivy-action` (Mar 2026 supply-chain incident — always SHA-pin trivy).
-Others pinned to major tags; Dependabot keeps them current.
+`actions/delete-package-versions`, `aquasecurity/trivy-action` (Mar 2026 supply-chain
+incident — always SHA-pin trivy). Others pinned to major tags; Dependabot keeps them
+current.
 
 **Typical PR flow:**
 1. branch → commit → push → `gh pr create`
 2. wait for 9 checks green; rebase on main if `strict` blocks merge
 3. `gh pr merge --squash`
 
-**Release flow (manual):**
-1. Bump `workspace.package.version` in `Cargo.toml` (all four crates share it).
-   Conventional Commits inform the bump (`feat:` → minor, `fix:` → patch,
-   `!` → major). Update `CHANGELOG.md` files by hand if desired.
-2. Merge the bump PR to main, then push `vX.Y.Z` tag:
-   `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. Tag push → `docker.yml` builds + pushes `ghcr.io/chronophylos/twitch-1337`
-   with tags `vX.Y.Z`, `X.Y`, `latest`. `just deploy` always pulls the latest
-   released image — no bleeding-main deploys.
-4. Rollback: `docker pull ...:vX.Y.Z` of a prior tag, then `just restart`.
+**Release flow (rolling):**
+1. Merge a PR into `main`. `docker.yml` triggers on push to main with
+   `paths-ignore` for docs/spec-only changes (no needless rebuilds).
+2. CI builds the musl static binary and pushes the image to
+   `ghcr.io/chronophylos/twitch-1337` with tags `latest` and
+   `b<github.run_number>` (e.g. `b1234`).
+3. The homelab webhook fires on GHCR push; the server pulls `:latest`
+   and `docker compose up -d` restarts the bot.
+4. The dashboard sidebar and the startup log line `Build info` show
+   `BUILD_NUM` + `GIT_SHA` — that is the source of truth for "what is
+   running right now".
+5. Rollback: `ssh docker.homelab`, edit the compose file to pin
+   `:b<N-1>`, `docker compose up -d`. The previous image is still
+   present until the weekly GHCR retention prune (keeps last 30).
+
+There are no `vX.Y.Z` tags, no GitHub Releases, no `CHANGELOG.md`. `git
+log` on `main` is the release history. The workspace version stays at
+`0.0.0` permanently.
 
 **When `cargo audit` fails:**
 - Check open Dependabot PRs first (weekly); a bump may already be queued.

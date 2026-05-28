@@ -1538,7 +1538,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llm"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "async-trait",
  "reqwest 0.13.3",
@@ -3338,7 +3338,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "twitch-1337"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3358,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "twitch-1337-core"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3406,7 +3406,7 @@ dependencies = [
 
 [[package]]
 name = "twitch-1337-web"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "arc-swap",
  "askama",

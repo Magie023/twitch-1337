@@ -61,7 +61,7 @@ pub async fn serve_app(listener: TcpListener, app: Router, shutdown: Arc<Notify>
         .unwrap_or_else(|_| "<unknown>".to_owned());
     info!(
         target: "twitch_1337_web",
-        version = routes::health::PKG_VERSION,
+        build = routes::health::BUILD_NUM,
         sha = routes::health::GIT_SHA,
         "Build info",
     );
