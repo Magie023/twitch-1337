@@ -480,7 +480,9 @@ kbd {
   display: inline-flex; align-items: center; gap: 6px;
   cursor: pointer;
 }
-.chip:hover { background: var(--bg-2); color: var(--fg); }
+/* Hover affordance only for interactive chips (<a>/<button>); data-only
+   <span> chips (e.g. schedule cards) must not fake clickability. */
+.chip:where(a, button):hover { background: var(--bg-2); color: var(--fg); }
 .chip.active {
   background: var(--accent-fade);
   color: var(--fg);
