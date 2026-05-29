@@ -21,7 +21,7 @@ async fn startup_announce_posts_to_admin_channel() {
     // TwitchIRCClient::say() prepends ". " to defeat command injection.
     let stripped = body.strip_prefix(". ").unwrap_or(&body);
     assert!(
-        stripped.starts_with("I'm up KOK · b"),
+        stripped.starts_with("I'm up KOK · "),
         "unexpected startup body: {body}"
     );
 
@@ -37,7 +37,7 @@ async fn v_command_replies_with_build_and_uptime() {
 
     let body = bot.expect_reply(TIMEOUT).await;
     assert!(
-        body.starts_with("billyReady · b"),
+        body.starts_with("billyReady · "),
         "unexpected !v body: {body}"
     );
     assert!(body.contains(" · up "), "missing uptime in !v body: {body}");

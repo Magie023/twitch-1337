@@ -15,9 +15,11 @@ use twitch_irc::{TwitchIRCClient, login::LoginCredentials, transport::Transport}
 /// outgoing buffer could stall the graceful-exit path on an unbounded send.
 const ANNOUNCE_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// `b{BUILD_NUM} · {GIT_SHA_SHORT}` — baked at compile time by `build.rs`.
+/// `{BUILD_NUM} · {GIT_SHA_SHORT}` — baked at compile time by `build.rs`.
+/// `BUILD_NUM` already carries the `b` prefix in CI (e.g. `b123`, matching the
+/// image tag); emit it verbatim so we don't double it up (`bb123`).
 pub fn version_line() -> String {
-    format!("b{} · {}", env!("BUILD_NUM"), env!("GIT_SHA_SHORT"))
+    format!("{} · {}", env!("BUILD_NUM"), env!("GIT_SHA_SHORT"))
 }
 
 /// Compact uptime: the first non-zero unit and up to two more non-zero units
@@ -159,13 +161,21 @@ mod tests {
     #[test]
     fn version_line_shape() {
         let v = version_line();
-        assert!(v.starts_with('b'), "got {v}");
+        // `BUILD_NUM` is the canonical build identity verbatim (CI bakes the
+        // `b` prefix, e.g. `b123`). `version_line` must not prepend another —
+        // a regression once produced `bb123`.
+        assert!(v.starts_with(env!("BUILD_NUM")), "got {v}");
+        assert!(!v.starts_with("bb"), "double-b prefix: {v}");
         assert!(v.contains(" · "), "got {v}");
     }
 
     #[test]
     fn startup_message_shape() {
-        assert!(startup_message().starts_with("I'm up KOK · b"));
+        let m = startup_message();
+        assert!(
+            m.starts_with(&format!("I'm up KOK · {}", env!("BUILD_NUM"))),
+            "got {m}"
+        );
     }
 
     #[test]
@@ -182,7 +192,10 @@ mod tests {
     #[test]
     fn version_reply_shape() {
         let r = version_reply_message(Duration::from_secs(90));
-        assert!(r.starts_with("billyReady · b"), "got {r}");
+        assert!(
+            r.starts_with(&format!("billyReady · {}", env!("BUILD_NUM"))),
+            "got {r}"
+        );
         assert!(r.contains(" · up 1m 30s"), "got {r}");
     }
 }
