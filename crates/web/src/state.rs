@@ -89,6 +89,10 @@ pub struct WebState {
     pub model_cache: Arc<ModelListCache>,
     /// Shared `reqwest::Client` for outbound HTTP (model list proxy, etc.).
     pub http: reqwest::Client,
+    /// Per-schedule runtime telemetry (last_fired_at, fires_today, day_anchor).
+    /// Shared with the IRC `schedule_runner` orchestrator so the dashboard
+    /// surfaces live fire counters.
+    pub telemetry: Arc<twitch_1337_core::schedule::TelemetryStore>,
 }
 
 /// Derive the signed-cookie [`Key`] from `[web].session_secret`.

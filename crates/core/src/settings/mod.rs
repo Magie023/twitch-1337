@@ -29,7 +29,7 @@ pub use audit::MemoryAuditLog;
 pub use audit::{AuditChange, AuditEntry, AuditError, AuditLog, FileAuditLog};
 pub use aviationstack::AviationstackSettings;
 pub use overrides::{AiOverrides, CooldownsOverrides, PingsOverrides, SettingsOverrides};
-pub use schedules::ScheduleSettings;
+pub use schedules::Schedule;
 pub use store::{Actor, SettingsStore};
 pub use suspend::SuspendSettings;
 pub use twitch::TwitchRuntime;
@@ -43,7 +43,7 @@ use thiserror::Error;
 
 pub type SettingsHandle = Arc<ArcSwap<Settings>>;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
@@ -55,7 +55,7 @@ pub struct Settings {
     pub aviationstack: AviationstackSettings,
     pub suspend: SuspendSettings,
     pub web: WebRuntime,
-    pub schedules: Vec<ScheduleSettings>,
+    pub schedules: Vec<Schedule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,110 +277,13 @@ impl Settings {
         let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (idx, sc) in self.schedules.iter().enumerate() {
             let prefix = format!("schedules[{idx}]");
-            if sc.name.trim().is_empty() {
-                errs.push(FieldError {
-                    field: format!("{prefix}.name"),
-                    message: "must not be blank".into(),
-                });
-            } else if !seen_names.insert(sc.name.trim()) {
+            // Per-row validation lives on `Schedule`.
+            errs.extend(sc.validate(&prefix));
+            // Uniqueness check (cross-row, so it stays here).
+            if !sc.name.trim().is_empty() && !seen_names.insert(sc.name.trim()) {
                 errs.push(FieldError {
                     field: format!("{prefix}.name"),
                     message: format!("duplicate name {:?}", sc.name.trim()),
-                });
-            }
-            if !sc.name.trim().is_empty() {
-                let bad: Vec<char> = sc
-                    .name
-                    .chars()
-                    .filter(|c| {
-                        // URL-reserved or query-decoded chars that break the
-                        // dashboard's /schedules/<name>/edit + ?edit=<name>
-                        // routes, plus ASCII control chars (log injection,
-                        // IRC framing). PR #227 review F6 + F9.
-                        matches!(
-                            c,
-                            '/' | '?' | '#' | '%' | '&' | '+' | '=' | ' ' | '\'' | '"'
-                        ) || c.is_control()
-                    })
-                    .collect();
-                if !bad.is_empty() {
-                    errs.push(FieldError {
-                        field: format!("{prefix}.name"),
-                        message: format!(
-                            "must not contain URL-reserved, whitespace, quote, or control characters {bad:?}"
-                        ),
-                    });
-                }
-            }
-            if sc.message.trim().is_empty() {
-                errs.push(FieldError {
-                    field: format!("{prefix}.message"),
-                    message: "must not be blank".into(),
-                });
-            }
-            match crate::database::Schedule::parse_interval(&sc.interval) {
-                Ok(d) if d.num_seconds() <= 0 => {
-                    errs.push(FieldError {
-                        field: format!("{prefix}.interval"),
-                        message: format!("must be > 0 (got {:?})", sc.interval),
-                    });
-                }
-                Ok(_) => {}
-                Err(e) => errs.push(FieldError {
-                    field: format!("{prefix}.interval"),
-                    message: format!("invalid: {e}"),
-                }),
-            }
-            for (field, val) in [
-                ("start_date", sc.start_date.as_deref()),
-                ("end_date", sc.end_date.as_deref()),
-            ] {
-                if let Some(v) = val
-                    && chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M:%S").is_err()
-                {
-                    errs.push(FieldError {
-                        field: format!("{prefix}.{field}"),
-                        message: format!("must be YYYY-MM-DDTHH:MM:SS (got {v:?})"),
-                    });
-                }
-            }
-            for (field, val) in [
-                ("active_time_start", sc.active_time_start.as_deref()),
-                ("active_time_end", sc.active_time_end.as_deref()),
-            ] {
-                if let Some(v) = val
-                    && chrono::NaiveTime::parse_from_str(v, "%H:%M").is_err()
-                {
-                    errs.push(FieldError {
-                        field: format!("{prefix}.{field}"),
-                        message: format!("must be HH:MM (got {v:?})"),
-                    });
-                }
-            }
-            match (
-                sc.active_time_start.as_deref(),
-                sc.active_time_end.as_deref(),
-            ) {
-                (Some(_), None) => errs.push(FieldError {
-                    field: format!("{prefix}.active_time_end"),
-                    message: "must be set when active_time_start is set".into(),
-                }),
-                (None, Some(_)) => errs.push(FieldError {
-                    field: format!("{prefix}.active_time_start"),
-                    message: "must be set when active_time_end is set".into(),
-                }),
-                _ => {}
-            }
-            if let (Some(sd), Some(ed)) = (sc.start_date.as_deref(), sc.end_date.as_deref())
-                && let (Ok(s), Ok(e)) = (
-                    chrono::NaiveDateTime::parse_from_str(sd, "%Y-%m-%dT%H:%M:%S"),
-                    chrono::NaiveDateTime::parse_from_str(ed, "%Y-%m-%dT%H:%M:%S"),
-                )
-                && e <= s
-            {
-                errs.push(FieldError {
-                    field: format!("{prefix}.end_date"),
-                    message: format!("must be after start_date (start={sd}, end={ed})"),
                 });
             }
         }
@@ -922,9 +825,9 @@ mod resolve_tests {
     }
 
     #[test]
-    fn compiled_defaults_v3_layout() {
+    fn compiled_defaults_v4_layout() {
         let s = Settings::compiled_defaults();
-        assert_eq!(s.schema_version, 3);
+        assert_eq!(s.schema_version, 4);
         assert_eq!(s.ai, AiSettings::default());
         assert_eq!(s.twitch, TwitchRuntime::default());
         assert_eq!(s.aviationstack, AviationstackSettings::default());
@@ -1238,15 +1141,21 @@ mod resolve_tests {
 
     #[test]
     fn schedules_override_wholesale_replaces() {
-        use crate::settings::ScheduleSettings;
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let defaults = Settings::compiled_defaults();
         let overrides = overrides::SettingsOverrides {
-            schedules: Some(vec![ScheduleSettings {
+            schedules: Some(vec![Schedule {
                 name: "noon".into(),
                 message: "hi".into(),
-                interval: "01:00".into(),
+                trigger: Trigger::Interval {
+                    every: std::time::Duration::from_secs(3600),
+                    days: WeekdaySet::default(),
+                    active_from: None,
+                    active_to: None,
+                },
+                start_date: None,
+                end_date: None,
                 enabled: true,
-                ..Default::default()
             }]),
             ..overrides::SettingsOverrides::default()
         };
@@ -1265,22 +1174,34 @@ mod resolve_tests {
 
     #[test]
     fn validate_rejects_duplicate_schedule_name() {
-        use crate::settings::ScheduleSettings;
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let mut s = Settings::compiled_defaults();
         s.schedules = vec![
-            ScheduleSettings {
+            Schedule {
                 name: "a".into(),
                 message: "hi".into(),
-                interval: "01:00".into(),
+                trigger: Trigger::Interval {
+                    every: std::time::Duration::from_secs(3600),
+                    days: WeekdaySet::default(),
+                    active_from: None,
+                    active_to: None,
+                },
+                start_date: None,
+                end_date: None,
                 enabled: true,
-                ..Default::default()
             },
-            ScheduleSettings {
+            Schedule {
                 name: "a".into(),
                 message: "hi".into(),
-                interval: "01:00".into(),
+                trigger: Trigger::Interval {
+                    every: std::time::Duration::from_secs(3600),
+                    days: WeekdaySet::default(),
+                    active_from: None,
+                    active_to: None,
+                },
+                start_date: None,
+                end_date: None,
                 enabled: true,
-                ..Default::default()
             },
         ];
         let errs = s
@@ -1292,61 +1213,49 @@ mod resolve_tests {
     }
 
     #[test]
-    fn validate_rejects_bad_interval() {
-        use crate::settings::ScheduleSettings;
-        let mut s = Settings::compiled_defaults();
-        s.schedules = vec![ScheduleSettings {
-            name: "x".into(),
-            message: "hi".into(),
-            interval: "not-a-duration".into(),
-            enabled: true,
-            ..Default::default()
-        }];
-        let errs = s
-            .validate(&ValidationContext {
-                channel: "test".into(),
-            })
-            .expect_err("bad interval must fail");
-        assert!(errs.iter().any(|e| e.field == "schedules[0].interval"));
-    }
-
-    #[test]
     fn validate_rejects_single_active_time_field() {
-        use crate::settings::ScheduleSettings;
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let mut s = Settings::compiled_defaults();
-        s.schedules = vec![ScheduleSettings {
+        s.schedules = vec![Schedule {
             name: "x".into(),
             message: "hi".into(),
-            interval: "01:00".into(),
-            active_time_start: Some("09:00".into()),
-            active_time_end: None,
+            trigger: Trigger::Interval {
+                every: std::time::Duration::from_secs(3600),
+                days: WeekdaySet::default(),
+                active_from: Some(chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
+                active_to: None,
+            },
+            start_date: None,
+            end_date: None,
             enabled: true,
-            ..Default::default()
         }];
         let errs = s
             .validate(&ValidationContext {
                 channel: "test".into(),
             })
-            .expect_err("orphan active_time_start must fail");
+            .expect_err("orphan active_from must fail");
         assert!(
             errs.iter()
-                .any(|e| e.field == "schedules[0].active_time_end")
+                .any(|e| e.field == "schedules[0].trigger.active_to")
         );
     }
 
     #[test]
-    fn validate_accepts_disabled_schedule_even_if_malformed_dates() {
-        // Disabled rows still need a parseable interval (cheapest invariant
-        // to keep the dashboard's add-form honest), but optional date strings
-        // are not validated.
-        use crate::settings::ScheduleSettings;
+    fn validate_accepts_disabled_schedule() {
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let mut s = Settings::compiled_defaults();
-        s.schedules = vec![ScheduleSettings {
+        s.schedules = vec![Schedule {
             name: "x".into(),
             message: "hi".into(),
-            interval: "01:00".into(),
+            trigger: Trigger::Interval {
+                every: std::time::Duration::from_secs(3600),
+                days: WeekdaySet::default(),
+                active_from: None,
+                active_to: None,
+            },
+            start_date: None,
+            end_date: None,
             enabled: false,
-            ..Default::default()
         }];
         s.validate(&ValidationContext {
             channel: "test".into(),
@@ -1365,16 +1274,20 @@ mod resolve_tests {
 
     #[test]
     fn validate_rejects_end_date_before_start_date() {
-        use crate::settings::ScheduleSettings;
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let mut s = Settings::compiled_defaults();
-        s.schedules = vec![ScheduleSettings {
+        s.schedules = vec![Schedule {
             name: "x".into(),
             message: "hi".into(),
-            interval: "01:00".into(),
-            start_date: Some("2027-01-01T00:00:00".into()),
-            end_date: Some("2026-01-01T00:00:00".into()),
+            trigger: Trigger::Interval {
+                every: std::time::Duration::from_secs(3600),
+                days: WeekdaySet::default(),
+                active_from: None,
+                active_to: None,
+            },
+            start_date: Some(chrono::NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()),
+            end_date: Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
             enabled: true,
-            ..Default::default()
         }];
         let errs = s
             .validate(&ValidationContext {
@@ -1386,14 +1299,20 @@ mod resolve_tests {
 
     #[test]
     fn validate_rejects_schedule_name_with_slash() {
-        use crate::settings::ScheduleSettings;
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let mut s = Settings::compiled_defaults();
-        s.schedules = vec![ScheduleSettings {
+        s.schedules = vec![Schedule {
             name: "morning/evening".into(),
             message: "hi".into(),
-            interval: "01:00".into(),
+            trigger: Trigger::Interval {
+                every: std::time::Duration::from_secs(3600),
+                days: WeekdaySet::default(),
+                active_from: None,
+                active_to: None,
+            },
+            start_date: None,
+            end_date: None,
             enabled: true,
-            ..Default::default()
         }];
         let errs = s
             .validate(&ValidationContext {
@@ -1405,14 +1324,20 @@ mod resolve_tests {
 
     #[test]
     fn validate_rejects_schedule_name_with_ampersand() {
-        use crate::settings::ScheduleSettings;
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let mut s = Settings::compiled_defaults();
-        s.schedules = vec![ScheduleSettings {
+        s.schedules = vec![Schedule {
             name: "foo&bar".into(),
             message: "m".into(),
-            interval: "01:00".into(),
+            trigger: Trigger::Interval {
+                every: std::time::Duration::from_secs(3600),
+                days: WeekdaySet::default(),
+                active_from: None,
+                active_to: None,
+            },
+            start_date: None,
+            end_date: None,
             enabled: true,
-            ..Default::default()
         }];
         let errs = s
             .validate(&ValidationContext {
@@ -1424,14 +1349,20 @@ mod resolve_tests {
 
     #[test]
     fn validate_rejects_schedule_name_with_space() {
-        use crate::settings::ScheduleSettings;
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let mut s = Settings::compiled_defaults();
-        s.schedules = vec![ScheduleSettings {
+        s.schedules = vec![Schedule {
             name: "foo bar".into(),
             message: "m".into(),
-            interval: "01:00".into(),
+            trigger: Trigger::Interval {
+                every: std::time::Duration::from_secs(3600),
+                days: WeekdaySet::default(),
+                active_from: None,
+                active_to: None,
+            },
+            start_date: None,
+            end_date: None,
             enabled: true,
-            ..Default::default()
         }];
         let errs = s
             .validate(&ValidationContext {
@@ -1443,14 +1374,20 @@ mod resolve_tests {
 
     #[test]
     fn validate_rejects_schedule_name_with_control_char() {
-        use crate::settings::ScheduleSettings;
+        use crate::schedule::{Schedule, Trigger, WeekdaySet};
         let mut s = Settings::compiled_defaults();
-        s.schedules = vec![ScheduleSettings {
+        s.schedules = vec![Schedule {
             name: "foo\nbar".into(),
             message: "m".into(),
-            interval: "01:00".into(),
+            trigger: Trigger::Interval {
+                every: std::time::Duration::from_secs(3600),
+                days: WeekdaySet::default(),
+                active_from: None,
+                active_to: None,
+            },
+            start_date: None,
+            end_date: None,
             enabled: true,
-            ..Default::default()
         }];
         let errs = s
             .validate(&ValidationContext {

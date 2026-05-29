@@ -12,6 +12,7 @@ askama = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 eyre = { workspace = true }
 hex = { workspace = true }
 http = "1"

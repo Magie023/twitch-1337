@@ -201,6 +201,9 @@ async fn build_state_inner_keep_settings(
     let memory_store = MemoryStore::open(memory_dir.path(), settings_handle.clone())
         .await
         .expect("open memory store");
+    // Reuse pings_dir for telemetry: TelemetryStore only writes on flush, and
+    // pings_dir is returned to callers so it stays alive for the test lifetime.
+    let telemetry = twitch_1337_core::schedule::TelemetryStore::open(pings_dir.path());
     let state = WebState {
         sessions,
         helix,
@@ -225,6 +228,7 @@ async fn build_state_inner_keep_settings(
         ai_bootstrap: None,
         model_cache: Arc::new(twitch_1337_web::routes::ai_models::ModelListCache::default()),
         http: reqwest::Client::new(),
+        telemetry,
     };
     (state, pings_dir, memory_dir, settings_dir)
 }

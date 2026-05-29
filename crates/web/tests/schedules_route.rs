@@ -1,11 +1,13 @@
 //! Integration tests for /schedules CRUD (mod-gated).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use tower::ServiceExt as _;
-use twitch_1337_core::settings::{Actor, ScheduleSettings, overrides::SettingsOverrides};
+use twitch_1337_core::schedule::{Schedule, Trigger, WeekdaySet};
+use twitch_1337_core::settings::{Actor, overrides::SettingsOverrides};
 use twitch_1337_web::build_router;
 
 mod helpers;
@@ -27,7 +29,7 @@ async fn body_string(res: axum::http::Response<Body>) -> String {
 
 /// Apply schedules via the store so we can seed pre-test state without
 /// going through the dashboard.
-async fn seed_schedules(state: &twitch_1337_web::WebState, rows: Vec<ScheduleSettings>) {
+async fn seed_schedules(state: &twitch_1337_web::WebState, rows: Vec<Schedule>) {
     state
         .settings_store
         .apply(
@@ -44,6 +46,30 @@ async fn seed_schedules(state: &twitch_1337_web::WebState, rows: Vec<ScheduleSet
         .expect("seed schedules");
 }
 
+fn interval_schedule(name: &str, message: &str) -> Schedule {
+    Schedule {
+        name: name.into(),
+        message: message.into(),
+        trigger: Trigger::Interval {
+            every: Duration::from_secs(3600),
+            days: WeekdaySet::default(),
+            active_from: None,
+            active_to: None,
+        },
+        start_date: None,
+        end_date: None,
+        enabled: true,
+    }
+}
+
+/// Build a URL-encoded form body for a new/updated interval schedule.
+fn interval_form(csrf: &str, name: &str, message: &str) -> String {
+    format!(
+        "_csrf={csrf}&name={name}&message={message}&kind=interval&interval_every=01%3A00&interval_active_from=&interval_active_to=&start_date=&end_date=&enabled=true",
+        csrf = urlencoding::encode(csrf),
+    )
+}
+
 #[tokio::test]
 async fn add_schedule_persists_and_renders() {
     install_crypto();
@@ -51,10 +77,7 @@ async fn add_schedule_persists_and_renders() {
     let (sid, csrf_cookie, bare_csrf) = insert_session(&state, "999", "mod");
     let app = build_router(state.clone());
 
-    let body = format!(
-        "_csrf={csrf}&name=noon&message=midday&interval=01%3A00&start_date=&end_date=&active_time_start=&active_time_end=&enabled=true",
-        csrf = urlencoding::encode(&bare_csrf),
-    );
+    let body = interval_form(&bare_csrf, "noon", "midday");
     let req = Request::builder()
         .method("POST")
         .uri("/schedules/add")
@@ -84,24 +107,11 @@ async fn add_schedule_persists_and_renders() {
 async fn edit_schedule_renames() {
     install_crypto();
     let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
-    seed_schedules(
-        &state,
-        vec![ScheduleSettings {
-            name: "old".into(),
-            message: "hi".into(),
-            interval: "01:00".into(),
-            enabled: true,
-            ..Default::default()
-        }],
-    )
-    .await;
+    seed_schedules(&state, vec![interval_schedule("old", "hi")]).await;
     let (sid, csrf_cookie, bare_csrf) = insert_session(&state, "999", "mod");
     let app = build_router(state.clone());
 
-    let body = format!(
-        "_csrf={csrf}&name=new&message=hi&interval=01%3A00&start_date=&end_date=&active_time_start=&active_time_end=&enabled=true",
-        csrf = urlencoding::encode(&bare_csrf),
-    );
+    let body = interval_form(&bare_csrf, "new", "hi");
     let req = Request::builder()
         .method("POST")
         .uri("/schedules/old/edit")
@@ -122,31 +132,13 @@ async fn edit_duplicate_name_returns_error_without_persisting() {
     let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
     seed_schedules(
         &state,
-        vec![
-            ScheduleSettings {
-                name: "a".into(),
-                message: "hi".into(),
-                interval: "01:00".into(),
-                enabled: true,
-                ..Default::default()
-            },
-            ScheduleSettings {
-                name: "b".into(),
-                message: "hi".into(),
-                interval: "01:00".into(),
-                enabled: true,
-                ..Default::default()
-            },
-        ],
+        vec![interval_schedule("a", "hi"), interval_schedule("b", "hi")],
     )
     .await;
     let (sid, csrf_cookie, bare_csrf) = insert_session(&state, "999", "mod");
     let app = build_router(state.clone());
 
-    let body = format!(
-        "_csrf={csrf}&name=a&message=hi&interval=01%3A00&start_date=&end_date=&active_time_start=&active_time_end=&enabled=true",
-        csrf = urlencoding::encode(&bare_csrf),
-    );
+    let body = interval_form(&bare_csrf, "a", "hi");
     let req = Request::builder()
         .method("POST")
         .uri("/schedules/b/edit")
@@ -167,17 +159,7 @@ async fn edit_duplicate_name_returns_error_without_persisting() {
 async fn delete_schedule_removes_row() {
     install_crypto();
     let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
-    seed_schedules(
-        &state,
-        vec![ScheduleSettings {
-            name: "gone".into(),
-            message: "x".into(),
-            interval: "01:00".into(),
-            enabled: true,
-            ..Default::default()
-        }],
-    )
-    .await;
+    seed_schedules(&state, vec![interval_schedule("gone", "x")]).await;
     let (sid, csrf_cookie, bare_csrf) = insert_session(&state, "999", "mod");
     let app = build_router(state.clone());
 
@@ -199,17 +181,7 @@ async fn delete_schedule_removes_row() {
 async fn edit_query_param_renders_inline_form() {
     install_crypto();
     let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
-    seed_schedules(
-        &state,
-        vec![ScheduleSettings {
-            name: "alpha".into(),
-            message: "hi".into(),
-            interval: "01:00".into(),
-            enabled: true,
-            ..Default::default()
-        }],
-    )
-    .await;
+    seed_schedules(&state, vec![interval_schedule("alpha", "hi")]).await;
     let (sid, csrf_cookie, _bare_csrf) = insert_session(&state, "999", "mod");
     let app = build_router(state.clone());
 
@@ -233,20 +205,8 @@ async fn edit_validation_failure_reopens_form_with_new_name() {
     seed_schedules(
         &state,
         vec![
-            ScheduleSettings {
-                name: "keep".into(),
-                message: "hi".into(),
-                interval: "01:00".into(),
-                enabled: true,
-                ..Default::default()
-            },
-            ScheduleSettings {
-                name: "b".into(),
-                message: "hi".into(),
-                interval: "01:00".into(),
-                enabled: true,
-                ..Default::default()
-            },
+            interval_schedule("keep", "hi"),
+            interval_schedule("b", "hi"),
         ],
     )
     .await;
@@ -254,10 +214,7 @@ async fn edit_validation_failure_reopens_form_with_new_name() {
     let app = build_router(state.clone());
 
     // Try to rename "b" to "keep" — duplicate name, validation fails.
-    let body = format!(
-        "_csrf={csrf}&name=keep&message=hi&interval=01%3A00&start_date=&end_date=&active_time_start=&active_time_end=&enabled=true",
-        csrf = urlencoding::encode(&bare_csrf),
-    );
+    let body = interval_form(&bare_csrf, "keep", "hi");
     let req = Request::builder()
         .method("POST")
         .uri("/schedules/b/edit")

@@ -203,56 +203,274 @@ pub fn migrate_legacy_config(root: &toml::Value) -> Result<super::overrides::Set
             .map(|d| d.as_secs());
     }
 
-    if let Some(arr) = root.get("schedules").and_then(toml::Value::as_array) {
-        let mut out_vec: Vec<crate::settings::ScheduleSettings> = Vec::new();
-        for (idx, entry) in arr.iter().enumerate() {
-            let Some(t) = entry.as_table() else { continue };
-            let v = toml::Value::Table(t.clone());
-            let name = v.get("name").and_then(toml::Value::as_str).map(str::trim);
-            let message = v.get("message").and_then(toml::Value::as_str);
-            let interval = v
-                .get("interval")
-                .and_then(toml::Value::as_str)
-                .map(str::trim);
-            let (Some(name), Some(message), Some(interval)) = (name, message, interval) else {
-                tracing::warn!(
-                    schedule_index = idx,
-                    "legacy [[schedules]] entry missing name/message/interval; skipped during migration"
-                );
-                continue;
-            };
-            if name.is_empty() || message.trim().is_empty() || interval.is_empty() {
-                tracing::warn!(
-                    schedule_index = idx,
-                    name = %name,
-                    "legacy [[schedules]] entry has blank required field; skipped during migration"
-                );
-                continue;
-            }
-            let enabled = v
-                .get("enabled")
-                .and_then(toml::Value::as_bool)
-                .unwrap_or(true);
-            let opt_str = |k: &str| -> Option<String> {
-                v.get(k).and_then(toml::Value::as_str).map(str::to_owned)
-            };
-            out_vec.push(crate::settings::ScheduleSettings {
-                name: name.to_owned(),
-                message: message.to_owned(),
-                interval: interval.to_owned(),
-                start_date: opt_str("start_date"),
-                end_date: opt_str("end_date"),
-                active_time_start: opt_str("active_time_start"),
-                active_time_end: opt_str("active_time_end"),
-                enabled,
-            });
-        }
-        if !out_vec.is_empty() {
-            out.schedules = Some(out_vec);
+    Ok(out)
+}
+
+/// In-place migration of raw RON `schedules` from v3 (`ScheduleSettings`
+/// with `interval: String`, `active_time_*: Option<String>`,
+/// `start_date: Option<String>` "YYYY-MM-DDTHH:MM:SS") to v4
+/// (`Schedule` with `trigger: Trigger::Interval`, `start_date:
+/// Option<NaiveDate>`).
+///
+/// Operates on a `ron::Value` representing the deserialized
+/// `SettingsOverrides` map. Returns `true` if any change was made.
+pub fn migrate_schedules_v3_to_v4(root: &mut ron::Value) -> bool {
+    let Some(sched_field) = map_get_mut(root, "schedules") else {
+        return false;
+    };
+
+    // schedules is `Option<Vec<Schedule>>` in serialized form:
+    //   None  => Value::Option(None)
+    //   Some(v) => Value::Option(Some(Box<Value::Seq(...)>))
+    let rows = match sched_field {
+        ron::Value::Option(Some(boxed)) => match boxed.as_mut() {
+            ron::Value::Seq(rows) => rows,
+            _ => return false,
+        },
+        _ => return false,
+    };
+
+    let mut changed = false;
+    for row in rows.iter_mut() {
+        if migrate_one_row(row) {
+            changed = true;
         }
     }
+    changed
+}
 
-    Ok(out)
+fn migrate_one_row(row: &mut ron::Value) -> bool {
+    // Already migrated? Skip if `trigger` is present.
+    if map_get(row, "trigger").is_some() {
+        return false;
+    }
+
+    let interval_secs = map_get(row, "interval")
+        .and_then(value_as_str)
+        .and_then(parse_interval_legacy)
+        .unwrap_or(60);
+
+    let active_from = take_optional_string(row, "active_time_start");
+    let active_to = take_optional_string(row, "active_time_end");
+
+    // Build the trigger Value::Map.
+    let mut t_map = ron::Map::new();
+    t_map.insert(
+        ron::Value::String("kind".into()),
+        ron::Value::String("interval".into()),
+    );
+    t_map.insert(
+        ron::Value::String("every".into()),
+        ron::Value::String(format!("{interval_secs}s")),
+    );
+    t_map.insert(
+        ron::Value::String("days".into()),
+        ron::Value::Seq(Vec::new()),
+    );
+    t_map.insert(
+        ron::Value::String("active_from".into()),
+        optional_string_to_value(active_from),
+    );
+    t_map.insert(
+        ron::Value::String("active_to".into()),
+        optional_string_to_value(active_to),
+    );
+
+    // Convert start_date/end_date "YYYY-MM-DDTHH:MM:SS" -> "YYYY-MM-DD".
+    convert_date_field(row, "start_date");
+    convert_date_field(row, "end_date");
+
+    map_insert(row, "trigger", ron::Value::Map(t_map));
+    map_remove(row, "interval");
+    map_remove(row, "active_time_start");
+    map_remove(row, "active_time_end");
+    true
+}
+
+fn convert_date_field(row: &mut ron::Value, key: &str) {
+    let Some(v) = map_get(row, key) else {
+        return;
+    };
+    let new = match v {
+        ron::Value::Option(Some(boxed)) => match boxed.as_ref() {
+            ron::Value::String(s) => {
+                let date_only = s.split('T').next().unwrap_or(s).to_owned();
+                ron::Value::Option(Some(Box::new(ron::Value::String(date_only))))
+            }
+            _ => ron::Value::Option(None),
+        },
+        _ => return,
+    };
+    map_insert(row, key, new);
+}
+
+fn parse_interval_legacy(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if let Some((h, m)) = s.split_once(':') {
+        let h: i64 = h.parse().ok()?;
+        let m: i64 = m.parse().ok()?;
+        let total = h * 3600 + m * 60;
+        if total <= 0 {
+            return None;
+        }
+        Some(total)
+    } else {
+        let s = s.to_lowercase();
+        let mut total = 0i64;
+        let mut cur = String::new();
+        for ch in s.chars() {
+            if ch.is_ascii_digit() {
+                cur.push(ch);
+            } else {
+                let n: i64 = cur.parse().ok()?;
+                cur.clear();
+                total += match ch {
+                    'h' => n * 3600,
+                    'm' => n * 60,
+                    's' => n,
+                    _ => return None,
+                };
+            }
+        }
+        if total == 0 { None } else { Some(total) }
+    }
+}
+
+// --- ron::Value::Map helpers -------------------------------------------
+
+fn map_get<'a>(root: &'a ron::Value, key: &str) -> Option<&'a ron::Value> {
+    match root {
+        ron::Value::Map(m) => m.get(&ron::Value::String(key.into())),
+        _ => None,
+    }
+}
+
+fn map_get_mut<'a>(root: &'a mut ron::Value, key: &str) -> Option<&'a mut ron::Value> {
+    match root {
+        ron::Value::Map(m) => m.get_mut(&ron::Value::String(key.into())),
+        _ => None,
+    }
+}
+
+fn map_insert(root: &mut ron::Value, key: &str, value: ron::Value) {
+    if let ron::Value::Map(m) = root {
+        m.insert(ron::Value::String(key.into()), value);
+    }
+}
+
+fn map_remove(root: &mut ron::Value, key: &str) {
+    if let ron::Value::Map(m) = root {
+        m.remove(&ron::Value::String(key.into()));
+    }
+}
+
+fn value_as_str(v: &ron::Value) -> Option<&str> {
+    match v {
+        ron::Value::String(s) => Some(s),
+        _ => None,
+    }
+}
+
+fn take_optional_string(row: &ron::Value, key: &str) -> Option<String> {
+    match map_get(row, key)? {
+        ron::Value::Option(Some(boxed)) => match boxed.as_ref() {
+            ron::Value::String(s) => Some(s.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn optional_string_to_value(v: Option<String>) -> ron::Value {
+    match v {
+        Some(s) => ron::Value::Option(Some(Box::new(ron::Value::String(s)))),
+        None => ron::Value::Option(None),
+    }
+}
+
+#[cfg(test)]
+mod v4_migration_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_row_gets_trigger_interval() {
+        // Build a minimal SettingsOverrides RON shape with a v3 schedule.
+        let raw = r#"(
+            schedules: Some([
+                (
+                    name: "noon",
+                    message: "hi",
+                    interval: "01:00",
+                    start_date: None,
+                    end_date: None,
+                    active_time_start: None,
+                    active_time_end: None,
+                    enabled: true,
+                ),
+            ]),
+        )"#;
+        let mut val: ron::Value = ron::from_str(raw).expect("parse");
+        assert!(migrate_schedules_v3_to_v4(&mut val));
+        let ser = ron::ser::to_string(&val).expect("ser");
+        assert!(ser.contains("trigger"));
+        assert!(ser.contains("interval"));
+        assert!(!ser.contains("active_time_start"));
+    }
+
+    #[test]
+    fn already_migrated_row_is_unchanged() {
+        let raw = r#"(
+            schedules: Some([
+                (
+                    name: "x",
+                    message: "y",
+                    trigger: (kind: "calendar", days: [], at: "09:00:00"),
+                    start_date: None,
+                    end_date: None,
+                    enabled: true,
+                ),
+            ]),
+        )"#;
+        let mut val: ron::Value = ron::from_str(raw).expect("parse");
+        let changed = migrate_schedules_v3_to_v4(&mut val);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn no_schedules_field_returns_false() {
+        let raw = r#"( cooldowns: () )"#;
+        let mut val: ron::Value = ron::from_str(raw).expect("parse");
+        assert!(!migrate_schedules_v3_to_v4(&mut val));
+    }
+
+    #[test]
+    fn parse_interval_legacy_rejects_zero() {
+        assert_eq!(parse_interval_legacy("00:00"), None);
+        assert_eq!(parse_interval_legacy("0:0"), None);
+    }
+
+    #[test]
+    fn date_field_truncates_time_component() {
+        let raw = r#"(
+            schedules: Some([
+                (
+                    name: "x",
+                    message: "y",
+                    interval: "01:00",
+                    start_date: Some("2026-06-01T00:00:00"),
+                    end_date: Some("2026-12-31T23:59:59"),
+                    active_time_start: None,
+                    active_time_end: None,
+                    enabled: true,
+                ),
+            ]),
+        )"#;
+        let mut val: ron::Value = ron::from_str(raw).expect("parse");
+        assert!(migrate_schedules_v3_to_v4(&mut val));
+        let ser = ron::ser::to_string(&val).expect("ser");
+        assert!(ser.contains("2026-06-01"));
+        assert!(!ser.contains("2026-06-01T"));
+    }
 }
 
 #[cfg(test)]
@@ -441,112 +659,6 @@ mod tests {
         // `owner` is bootstrap-only (config.toml) and is no longer migrated.
         assert_eq!(overrides.twitch.admin_channel, Some(None));
         assert_eq!(overrides.twitch.ai_channel, Some(None));
-    }
-
-    #[test]
-    fn legacy_schedules_array_migrates_into_overrides() {
-        let raw = r#"
-            [twitch]
-            channel = "c"
-            username = "u"
-            refresh_token = "r"
-            client_id = "i"
-            client_secret = "s"
-
-            [[schedules]]
-            name = "noon"
-            message = "midday"
-            interval = "01:00"
-            enabled = true
-
-            [[schedules]]
-            name = "winter"
-            message = "snow"
-            interval = "06:00"
-            start_date = "2026-12-01T00:00:00"
-            end_date = "2027-03-01T00:00:00"
-            active_time_start = "08:00"
-            active_time_end = "20:00"
-            enabled = false
-        "#;
-        let value: toml::Value = toml::from_str(raw).expect("parse");
-        let overrides = migrate_legacy_config(&value).expect("migrate");
-        let v = overrides.schedules.expect("Some");
-        assert_eq!(v.len(), 2);
-        assert_eq!(v[0].name, "noon");
-        assert!(v[0].enabled);
-        assert_eq!(v[1].name, "winter");
-        assert!(!v[1].enabled);
-        assert_eq!(v[1].start_date.as_deref(), Some("2026-12-01T00:00:00"));
-        assert_eq!(v[1].active_time_start.as_deref(), Some("08:00"));
-    }
-
-    #[test]
-    fn legacy_schedule_missing_required_keys_is_skipped() {
-        let toml_str = r#"
-            [twitch]
-            channel = "main"
-            username = "bot"
-            client_id = "x"
-            client_secret = "y"
-            refresh_token = "z"
-
-            [[schedules]]
-            # missing name + interval
-            message = "hi"
-
-            [[schedules]]
-            name = "good"
-            message = "morning"
-            interval = "01:00"
-
-            [[schedules]]
-            name = "blank_msg"
-            message = ""
-            interval = "01:00"
-        "#;
-        let value: toml::Value = toml::from_str(toml_str).expect("parse");
-        let overrides = migrate_legacy_config(&value).expect("migrate");
-        let v = overrides.schedules.expect("Some");
-        // Only the row with all required fields populated survives.
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0].name, "good");
-    }
-
-    #[test]
-    fn no_schedules_section_returns_none() {
-        let raw = r#"
-            [twitch]
-            channel = "c"
-            username = "u"
-            refresh_token = "r"
-            client_id = "i"
-            client_secret = "s"
-        "#;
-        let value: toml::Value = toml::from_str(raw).expect("parse");
-        let overrides = migrate_legacy_config(&value).expect("migrate");
-        assert!(overrides.schedules.is_none());
-    }
-
-    #[test]
-    fn schedules_default_enabled_true_when_key_absent() {
-        let raw = r#"
-            [twitch]
-            channel = "c"
-            username = "u"
-            refresh_token = "r"
-            client_id = "i"
-            client_secret = "s"
-
-            [[schedules]]
-            name = "x"
-            message = "y"
-            interval = "01:00"
-        "#;
-        let value: toml::Value = toml::from_str(raw).expect("parse");
-        let overrides = migrate_legacy_config(&value).expect("migrate");
-        let v = overrides.schedules.expect("Some");
-        assert!(v[0].enabled);
     }
 
     #[test]

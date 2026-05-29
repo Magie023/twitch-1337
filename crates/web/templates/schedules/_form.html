@@ -1,0 +1,122 @@
+{# Variant-picker schedule form. `form: &FormState`, `action: &str`, `cancel_href: Option<&str>` must
+   be bound in the calling template's scope before this include. #}
+<form method="post" action="{{ action }}" class="settings-rows schedule-form">
+  <input type="hidden" name="_csrf" value="{{ csrf }}">
+
+  <div class="row">
+    <label>Name
+      <input type="text" name="name" value="{{ form.name }}" required>
+    </label>
+  </div>
+  <div class="row">
+    <label>Message
+      <textarea name="message" rows="2" required>{{ form.message }}</textarea>
+    </label>
+  </div>
+
+  <fieldset class="trigger-picker">
+    <legend>Trigger</legend>
+
+    <label class="kind-radio">
+      <input type="radio" name="kind" value="interval"
+        {% if form.kind == "interval" || form.kind.is_empty() %}checked{% endif %}>
+      Interval — fires every N minutes/hours
+    </label>
+    <div class="trigger-fields" data-for="interval">
+      <div class="row">
+        <label>Every (hh:mm, e.g. 01:00 for hourly)
+          <input type="text" name="interval_every"
+            pattern="^\d{1,3}:[0-5]\d$"
+            placeholder="01:00"
+            value="{{ form.interval_every }}">
+        </label>
+      </div>
+      <div class="row">
+        <label>Active from (Berlin, optional)
+          <input type="time" name="interval_active_from" value="{{ form.interval_active_from }}">
+        </label>
+      </div>
+      <div class="row">
+        <label>Active to (Berlin, optional)
+          <input type="time" name="interval_active_to" value="{{ form.interval_active_to }}">
+        </label>
+      </div>
+      <div class="row">Days (empty = every day):</div>
+      <div class="row weekday-row">
+        <label class="weekday-chip"><input type="checkbox" name="interval_days" value="Mon" {% if form.interval_days.contains("Mon") %}checked{% endif %}> Mon</label>
+        <label class="weekday-chip"><input type="checkbox" name="interval_days" value="Tue" {% if form.interval_days.contains("Tue") %}checked{% endif %}> Tue</label>
+        <label class="weekday-chip"><input type="checkbox" name="interval_days" value="Wed" {% if form.interval_days.contains("Wed") %}checked{% endif %}> Wed</label>
+        <label class="weekday-chip"><input type="checkbox" name="interval_days" value="Thu" {% if form.interval_days.contains("Thu") %}checked{% endif %}> Thu</label>
+        <label class="weekday-chip"><input type="checkbox" name="interval_days" value="Fri" {% if form.interval_days.contains("Fri") %}checked{% endif %}> Fri</label>
+        <label class="weekday-chip"><input type="checkbox" name="interval_days" value="Sat" {% if form.interval_days.contains("Sat") %}checked{% endif %}> Sat</label>
+        <label class="weekday-chip"><input type="checkbox" name="interval_days" value="Sun" {% if form.interval_days.contains("Sun") %}checked{% endif %}> Sun</label>
+      </div>
+    </div>
+
+    <label class="kind-radio">
+      <input type="radio" name="kind" value="calendar"
+        {% if form.kind == "calendar" %}checked{% endif %}>
+      Calendar — fires at a fixed time
+    </label>
+    <div class="trigger-fields" data-for="calendar">
+      <div class="row">
+        <label>At (Berlin local time)
+          <input type="time" name="calendar_at" value="{{ form.calendar_at }}">
+        </label>
+      </div>
+      <div class="row">Days (empty = every day):</div>
+      <div class="row weekday-row">
+        <label class="weekday-chip"><input type="checkbox" name="calendar_days" value="Mon" {% if form.calendar_days.contains("Mon") %}checked{% endif %}> Mon</label>
+        <label class="weekday-chip"><input type="checkbox" name="calendar_days" value="Tue" {% if form.calendar_days.contains("Tue") %}checked{% endif %}> Tue</label>
+        <label class="weekday-chip"><input type="checkbox" name="calendar_days" value="Wed" {% if form.calendar_days.contains("Wed") %}checked{% endif %}> Wed</label>
+        <label class="weekday-chip"><input type="checkbox" name="calendar_days" value="Thu" {% if form.calendar_days.contains("Thu") %}checked{% endif %}> Thu</label>
+        <label class="weekday-chip"><input type="checkbox" name="calendar_days" value="Fri" {% if form.calendar_days.contains("Fri") %}checked{% endif %}> Fri</label>
+        <label class="weekday-chip"><input type="checkbox" name="calendar_days" value="Sat" {% if form.calendar_days.contains("Sat") %}checked{% endif %}> Sat</label>
+        <label class="weekday-chip"><input type="checkbox" name="calendar_days" value="Sun" {% if form.calendar_days.contains("Sun") %}checked{% endif %}> Sun</label>
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="row">
+    <label>Start date (Berlin, optional — inclusive)
+      <input type="date" name="start_date" value="{{ form.start_date }}">
+    </label>
+  </div>
+  <div class="row">
+    <label>End date (Berlin, optional — inclusive)
+      <input type="date" name="end_date" value="{{ form.end_date }}">
+    </label>
+  </div>
+  <div class="row">
+    <label>
+      <input type="checkbox" name="enabled" value="true"
+        {% if form.enabled %}checked{% endif %}>
+      Enabled
+    </label>
+  </div>
+
+  <div class="row form-actions">
+    <button type="submit" class="btn primary">Save</button>
+    {% if let Some(href) = cancel_href %}
+      <a class="btn ghost" href="{{ href }}">Cancel</a>
+    {% endif %}
+  </div>
+</form>
+
+<script>
+  (function () {
+    document.querySelectorAll('form.schedule-form').forEach(function (form) {
+      function refresh() {
+        var checked = form.querySelector('input[name="kind"]:checked');
+        var kind = checked ? checked.value : 'interval';
+        form.querySelectorAll('.trigger-fields').forEach(function (el) {
+          el.style.display = el.dataset.for === kind ? '' : 'none';
+        });
+      }
+      form.querySelectorAll('input[name="kind"]').forEach(function (r) {
+        r.addEventListener('change', refresh);
+      });
+      refresh();
+    });
+  })();
+</script>

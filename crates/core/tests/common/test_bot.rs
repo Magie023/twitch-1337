@@ -51,6 +51,9 @@ pub struct TestBot {
     /// Filled by the commands handler when AI + chat history are enabled; lets
     /// tests inspect chat-history entries (display_name / user_id / source).
     primary_history_tap: Arc<Mutex<Option<twitch_1337::ai::chat_history::ChatHistory>>>,
+    /// Shared telemetry store; exposes in-memory schedule fire counts for tests
+    /// without requiring on-disk flush.
+    pub telemetry: Arc<twitch_1337::schedule::TelemetryStore>,
     shutdown: Option<oneshot::Sender<()>>,
     bot_task: Option<JoinHandle<EyreResult<()>>>,
 }
@@ -271,6 +274,9 @@ impl TestBotBuilder {
         .await
         .expect("open memory store");
 
+        // Build the telemetry store once; share the Arc with Services, web, and TestBot.
+        let telemetry_store = twitch_1337::schedule::TelemetryStore::open(data_dir.path());
+
         let web_spawner = if self.config.web.enabled {
             let bind_addr: std::net::SocketAddr = self
                 .config
@@ -286,6 +292,7 @@ impl TestBotBuilder {
                 memory_store.clone(),
                 settings_handle.clone(),
                 settings_store.clone(),
+                telemetry_store.clone(),
             );
             let spawner: twitch_1337::WebSpawner = Box::new(move |shutdown| {
                 let deps = twitch_1337_web::WebDeps { bind_addr, state };
@@ -342,6 +349,7 @@ impl TestBotBuilder {
             aviation_tracker_tx,
             aviation_tracker_rx,
             primary_history_tap: Some(primary_history_tap.clone()),
+            telemetry: telemetry_store.clone(),
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -368,6 +376,7 @@ impl TestBotBuilder {
             channel,
             irc_connected,
             primary_history_tap,
+            telemetry: telemetry_store,
             shutdown: Some(shutdown_tx),
             bot_task: Some(bot_task),
         }
@@ -683,6 +692,7 @@ fn build_test_web_state(
     memory_store: twitch_1337::ai::memory::store::MemoryStore,
     settings: twitch_1337::settings::SettingsHandle,
     settings_store: Arc<twitch_1337::settings::SettingsStore>,
+    telemetry: Arc<twitch_1337::schedule::TelemetryStore>,
 ) -> twitch_1337_web::WebState {
     use twitch_1337_web::auth::OAuthCtx;
     use twitch_1337_web::auth::session::SessionTable;
@@ -744,5 +754,6 @@ fn build_test_web_state(
         ai_bootstrap: None,
         model_cache: Arc::new(twitch_1337_web::routes::ai_models::ModelListCache::default()),
         http: reqwest::Client::new(),
+        telemetry,
     }
 }

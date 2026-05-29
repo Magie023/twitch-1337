@@ -9,10 +9,10 @@ pub mod aviation;
 pub mod commands;
 pub mod config;
 pub mod cooldown;
-pub mod database;
 pub mod doener;
 pub mod llm_factory;
 pub mod ping;
+pub mod schedule;
 pub mod settings;
 pub mod suspend;
 pub mod twitch;
@@ -151,6 +151,12 @@ pub struct Services {
     /// peek at chat-history entries (display_name / user_id) for assertions.
     pub primary_history_tap:
         Option<Arc<tokio::sync::Mutex<Option<crate::ai::chat_history::ChatHistory>>>>,
+
+    /// Per-schedule runtime telemetry. Constructed here and shared with both
+    /// the IRC `schedule_runner` orchestrator (via `SpawnDeps`) and `WebState`
+    /// (via the web spawner closure) so the dashboard reads live fire counters
+    /// from the same in-memory map the bot writes.
+    pub telemetry: Arc<crate::schedule::TelemetryStore>,
 }
 
 pub type WebSpawner =
@@ -195,6 +201,7 @@ where
         aviation_tracker_tx,
         aviation_tracker_rx,
         primary_history_tap,
+        telemetry,
     } = services;
 
     // Clone the sender out of the Arc for SpawnDeps.
@@ -272,6 +279,7 @@ where
         settings: settings.clone(),
         settings_store,
         primary_history_tap,
+        telemetry: telemetry.clone(),
     });
 
     let shutdown_notify = handlers.shutdown_notify.clone();

@@ -1,0 +1,34 @@
+{# Single schedule card. `card: &CardView` and `csrf: &str` must be in scope. #}
+<article class="schedule-card {% if !card.enabled %}paused{% endif %}">
+  <header class="card-head">
+    <span class="card-title">{{ card.name }}</span>
+    <form method="post" action="/schedules/{{ card.name|urlencode }}/toggle" class="card-toggle">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <button class="toggle-switch" type="submit" aria-label="Toggle {{ card.name }}">
+        {% if card.enabled %}on{% else %}off{% endif %}
+      </button>
+    </form>
+  </header>
+  <p class="card-message">{{ card.message }}</p>
+  <div class="card-badges">
+    <span class="chip trigger">{{ card.trigger_label }}</span>
+    {% if let Some(w) = card.schedule_window_label.as_ref() %}
+      <span class="chip window">{{ w }}</span>
+    {% endif %}
+  </div>
+  <footer class="card-footer">
+    {% if let Some(n) = card.next_fire_human.as_ref() %}
+      <span class="chip next">NEXT {{ n }}</span>
+    {% endif %}
+    {% if let Some(last) = card.last_fired_human.as_ref() %}
+      <span class="chip last">{{ last }}</span>
+    {% endif %}
+    <span class="chip today">{{ card.fires_today }} today</span>
+    <a class="chip edit-link" href="/schedules?edit={{ card.name|urlencode }}">edit</a>
+    <form method="post" action="/schedules/{{ card.name|urlencode }}/delete"
+          class="js-delete-schedule" data-name="{{ card.name }}">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <button class="chip danger" type="submit">delete</button>
+    </form>
+  </footer>
+</article>

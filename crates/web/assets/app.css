@@ -1561,3 +1561,241 @@ textarea.input { resize: vertical; min-height: 140px; line-height: 1.6; }
   font-size: 12px;
   margin-left: 8px;
 }
+
+/* ====================== /schedules — card grid + variant form ===========
+   The dashboard renders schedules as a responsive card grid. The form is
+   a variant picker (Interval vs Calendar) with a per-variant fieldset that
+   reveals/hides its body based on the radio selection. The weekday-chip row
+   is shared between both variants. */
+
+.schedule-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.schedule-card {
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  border-radius: var(--r);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: relative;
+  overflow: hidden;
+}
+.schedule-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--accent);
+}
+.schedule-card.paused { opacity: 0.65; }
+.schedule-card.paused::before { background: var(--fg-4); }
+
+.schedule-card .card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.schedule-card .card-title {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: -0.01em;
+}
+.schedule-card.paused .card-title { color: var(--fg-3); }
+
+.schedule-card .card-toggle { margin: 0; }
+.schedule-card .toggle-switch {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-soft);
+  background: var(--accent-fade);
+  color: var(--accent);
+}
+.schedule-card.paused .toggle-switch {
+  border-color: var(--line-2);
+  background: var(--bg-2);
+  color: var(--fg-3);
+}
+.schedule-card .toggle-switch:hover { filter: brightness(1.1); }
+
+.schedule-card .card-message {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.schedule-card .card-badges,
+.schedule-card .card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.schedule-card .card-footer {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  margin-top: auto;
+}
+.schedule-card .card-footer form { margin: 0; display: inline-flex; }
+
+.schedule-card .chip {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 3px 9px;
+  cursor: default;
+}
+.schedule-card .chip.trigger { color: var(--fg); border-color: var(--line-2); }
+.schedule-card .chip.window { color: var(--accent); background: var(--accent-fade); border-color: var(--accent-soft); }
+.schedule-card .chip.next   { color: var(--accent); }
+.schedule-card .chip.last,
+.schedule-card .chip.today  { color: var(--fg-3); }
+.schedule-card .chip.edit-link { cursor: pointer; }
+.schedule-card .chip.edit-link:hover { color: var(--fg); }
+.schedule-card .chip.danger {
+  cursor: pointer;
+  color: var(--danger);
+  border-color: oklch(0.7 0.16 25 / 0.3);
+}
+.schedule-card .chip.danger:hover { background: oklch(0.7 0.16 25 / 0.12); }
+
+/* ─── Variant-picker form ────────────────────────────────────────────────
+   The form lives inside `.settings-card`. `.schedule-form` adds the
+   per-row label/input layout and styles the fieldset that scopes each
+   trigger variant. */
+.schedule-form { padding: 14px 22px 18px; }
+.schedule-form .row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border: 0;
+}
+.schedule-form .row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--fg-3);
+}
+.schedule-form .row > label:has(> input[type="checkbox"]) {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  font-size: 13px;
+}
+.schedule-form input[type="text"],
+.schedule-form input[type="time"],
+.schedule-form input[type="date"],
+.schedule-form textarea {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 8px 11px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg);
+  outline: none;
+  transition: border-color 0.12s ease, background 0.12s ease;
+  color-scheme: dark;
+  max-width: 420px;
+}
+.schedule-form input[type="text"]:focus,
+.schedule-form input[type="time"]:focus,
+.schedule-form input[type="date"]:focus,
+.schedule-form textarea:focus {
+  border-color: var(--line-strong);
+  background: var(--bg-2);
+}
+.schedule-form textarea {
+  resize: vertical;
+  min-height: 56px;
+  line-height: 1.5;
+  font-family: var(--sans);
+  max-width: none;
+}
+
+.schedule-form .trigger-picker {
+  margin: 10px 0;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-0);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.schedule-form .trigger-picker legend {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-4);
+  padding: 0 6px;
+}
+.schedule-form .kind-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg);
+  padding: 6px 0 4px;
+}
+.schedule-form .trigger-fields {
+  margin-left: 24px;
+  padding: 6px 0 10px;
+  border-left: 1px solid var(--line);
+  padding-left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.schedule-form .weekday-row {
+  flex-direction: row !important;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 2px;
+}
+.schedule-form .weekday-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-1);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+  cursor: pointer;
+  flex-direction: row;
+}
+.schedule-form .weekday-chip:has(input:checked) {
+  background: var(--accent-fade);
+  border-color: var(--accent-soft);
+  color: var(--accent);
+}
+.schedule-form .weekday-chip input { accent-color: var(--accent); }
+
+.schedule-form .form-actions {
+  flex-direction: row !important;
+  gap: 8px;
+  padding-top: 10px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}

@@ -29,7 +29,7 @@ pub struct SettingsOverrides {
     #[serde(default)]
     pub web: WebRuntimeOverrides,
     #[serde(default)]
-    pub schedules: Option<Vec<crate::settings::ScheduleSettings>>,
+    pub schedules: Option<Vec<crate::schedule::Schedule>>,
 }
 
 fn default_schema_version() -> u32 {

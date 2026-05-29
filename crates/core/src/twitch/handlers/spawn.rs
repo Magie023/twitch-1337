@@ -29,7 +29,6 @@ use crate::{
     ai,
     aviation::{self, AviationClient},
     config::Configuration,
-    database,
     ping::{PingCommand, PingManager, run_ping_actor},
     suspend::SuspensionManager,
     twitch::{
@@ -38,7 +37,7 @@ use crate::{
             commands::{CommandHandlerConfig, run_generic_command_handler},
             latency::run_latency_handler,
             router::run_message_router,
-            schedules::{self, run_scheduled_message_handler},
+            schedule_runner::run_orchestrator,
             tracker_1337::{PersonalBest, run_1337_handler},
         },
         whisper::WhisperSender,
@@ -54,7 +53,6 @@ pub(crate) struct HandlerSet {
     pub generic_commands: JoinHandle<()>,
     pub flight_tracker: JoinHandle<()>,
     pub ping_actor: JoinHandle<()>,
-    pub settings_sync: JoinHandle<()>,
     pub scheduled_messages: JoinHandle<()>,
     /// Shared notify so consolidation/shutdown code can drain in-flight
     /// scheduled-message sends. Cloned, not consumed.
@@ -115,6 +113,10 @@ pub(crate) struct SpawnDeps<T: Transport, L: LoginCredentials> {
     /// peek at chat-history entries. Production wires `None`.
     pub primary_history_tap:
         Option<Arc<tokio::sync::Mutex<Option<crate::ai::chat_history::ChatHistory>>>>,
+
+    /// Per-schedule runtime telemetry. Shared with the dashboard so card
+    /// chips ("12 today", "12m ago") read live data.
+    pub telemetry: Arc<crate::schedule::TelemetryStore>,
 }
 
 /// Spawn every long-running handler task in the order they currently
@@ -152,6 +154,7 @@ where
         settings,
         settings_store,
         primary_history_tap,
+        telemetry,
     } = deps;
 
     let ping_actor = tokio::spawn(run_ping_actor(ping_actor_rx, ping_manager, ping_names_tx));
@@ -187,32 +190,29 @@ where
     // Notify lets the scheduled-message handler drain in-flight sends before exiting.
     let shutdown_notify = Arc::new(Notify::new());
 
-    // Schedules: always-on. Initial cache is empty; the settings-sync task
-    // populates it from settings.ron before the handler's first 30s tick.
-    let mut cache = database::ScheduleCache::new();
-    cache.update(crate::settings::schedules::build_schedules(
-        &settings.load().schedules,
-    ));
-    let schedule_cache = Arc::new(RwLock::new(cache));
-
-    let settings_sync = tokio::spawn({
-        let settings = settings.clone();
-        let store = settings_store.clone();
-        let cache = schedule_cache.clone();
-        let shutdown = shutdown_notify.clone();
-        async move {
-            schedules::run_schedule_settings_sync(settings, store, cache, shutdown).await;
-        }
-    });
-
+    // Schedules orchestrator: subscribes to SettingsStore::change_notify
+    // and reconciles per-schedule tasks. No cache, no 30s poll.
+    // `telemetry` comes from the caller (constructed in run_bot so WebState
+    // and the orchestrator share the same Arc).
     let scheduled_messages = tokio::spawn({
         let sender = chat_sender.clone();
-        let cache = schedule_cache.clone();
+        let settings = settings.clone();
+        let change_notify = settings_store.change_notify();
+        let telemetry = telemetry.clone();
         let channel = config.twitch.channel.clone();
         let notify = shutdown_notify.clone();
         let clk = clock.clone();
         async move {
-            run_scheduled_message_handler(sender, cache, channel, notify, clk).await;
+            run_orchestrator(
+                sender,
+                settings,
+                change_notify,
+                telemetry,
+                channel,
+                notify,
+                clk,
+            )
+            .await;
         }
     });
 
@@ -294,7 +294,6 @@ where
         generic_commands,
         flight_tracker,
         ping_actor,
-        settings_sync,
         scheduled_messages,
         shutdown_notify,
     }
@@ -306,9 +305,9 @@ where
 /// drains in-flight `say()` calls) and waits up to 5s for the scheduled
 /// handler before returning.
 ///
-/// Both the settings-sync task and scheduled-message handler are now
-/// unconditional, so they appear directly as `JoinHandle<()>` in the
-/// `select!` arms rather than via `pending()` fallbacks.
+/// The scheduled-message handler subscribes directly to
+/// `SettingsStore::change_notify` and reconciles per-schedule tasks
+/// internally — there is no separate settings-sync task.
 pub(crate) async fn await_shutdown(
     handlers: HandlerSet,
     shutdown: oneshot::Receiver<()>,
@@ -320,7 +319,6 @@ pub(crate) async fn await_shutdown(
         generic_commands,
         flight_tracker,
         mut ping_actor,
-        settings_sync,
         scheduled_messages: mut sched,
         shutdown_notify,
     } = handlers;
@@ -335,7 +333,6 @@ pub(crate) async fn await_shutdown(
             }
         }
         result = router => { error!("Message router exited unexpectedly: {result:?}"); }
-        result = settings_sync => { error!("Schedule settings sync exited unexpectedly: {result:?}"); }
         result = tracker_1337 => { error!("1337 handler exited unexpectedly: {result:?}"); }
         result = generic_commands => { error!("Generic Command Handler exited unexpectedly: {result:?}"); }
         result = latency => { error!("Latency handler exited unexpectedly: {result:?}"); }

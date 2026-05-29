@@ -152,52 +152,6 @@ pub async fn main() -> Result<()> {
         std::fs::write(&v3_marker, "").wrap_err("write .config_migrated_v3 marker")?;
     }
 
-    // One-shot migration of `[[schedules]]`. Separate sentinel because PR 1's
-    // `.config_migrated_v3` may already exist on shipped deployments; sharing
-    // it would silently skip the schedules migration step.
-    let schedules_marker = get_data_dir().join(".schedules_migrated_v3");
-    let was_first_schedules_boot = !schedules_marker.exists();
-    if was_first_schedules_boot {
-        let patch = twitch_1337::settings::migrate::migrate_legacy_config(&raw_toml)
-            .wrap_err("schedules v3 migration")?;
-        if patch.schedules.is_some() {
-            // Build a slim patch that only carries the schedules section so we
-            // don't re-apply other migrated fields a second time.
-            let slim = twitch_1337::settings::overrides::SettingsOverrides {
-                schedules: patch.schedules,
-                ..twitch_1337::settings::overrides::SettingsOverrides::default()
-            };
-            let actor = twitch_1337::settings::Actor {
-                user_id: "migrate".into(),
-                user_login: "schedules-v3-migration".into(),
-            };
-            // Best-effort: a legacy row that was valid under the old loose
-            // validator can fail the new stricter Settings::validate (PR #227
-            // review F2). Log + carry on so the bot boots; operators can
-            // hand-edit config.toml or settings.ron.
-            match settings_store.apply(slim, actor).await {
-                Ok(_) => info!("migrated legacy [[schedules]] into settings.ron"),
-                Err(e) => tracing::error!(
-                    error = ?e,
-                    "schedules v3 migration apply failed; legacy [[schedules]] \
-                     skipped — bot will boot with no migrated schedules. \
-                     Fix the offending row in config.toml or manage schedules via /schedules."
-                ),
-            }
-        }
-        // Write the sentinel regardless of apply outcome: if apply failed, the
-        // operator must fix config.toml manually; re-running the migration on
-        // every boot wouldn't help and risks overwriting dashboard edits made
-        // in the meantime (PR #227 review F5).
-        if let Err(e) = std::fs::write(&schedules_marker, "") {
-            tracing::error!(
-                error = ?e,
-                marker = ?schedules_marker,
-                "failed to write .schedules_migrated_v3 marker; next boot will re-run the migration"
-            );
-        }
-    }
-
     let local = Utc::now().with_timezone(&chrono_tz::Europe::Berlin);
     let initial_schedule_count = settings_handle.load().schedules.len();
     info!(
@@ -277,7 +231,7 @@ pub async fn main() -> Result<()> {
             Some(*name)
         })
         .collect();
-    if !was_first_v3_boot && !was_first_schedules_boot && !stale.is_empty() {
+    if !was_first_v3_boot && !stale.is_empty() {
         tracing::warn!(
             ?stale,
             "legacy config.toml keys are now ignored after v3 migration; remove them from config.toml"
@@ -316,6 +270,9 @@ pub async fn main() -> Result<()> {
         (None, None)
     };
 
+    // Build telemetry once so the IRC orchestrator and WebState share the same Arc.
+    let telemetry = twitch_1337::schedule::TelemetryStore::open(&get_data_dir());
+
     let web_spawner = if config.web.enabled {
         let credentials_for_web = credentials.clone();
         Some(
@@ -329,6 +286,7 @@ pub async fn main() -> Result<()> {
                 aviation_tracker_tx.clone(),
                 settings_handle.clone(),
                 settings_store.clone(),
+                telemetry.clone(),
             )
             .await?,
         )
@@ -359,6 +317,7 @@ pub async fn main() -> Result<()> {
         aviation_tracker_tx,
         aviation_tracker_rx,
         primary_history_tap: None,
+        telemetry,
     };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -387,6 +346,7 @@ async fn build_web_spawner(
     tracker_tx: Option<Arc<tokio::sync::mpsc::Sender<aviation::TrackerCommand>>>,
     settings: twitch_1337::settings::SettingsHandle,
     settings_store: Arc<twitch_1337::settings::SettingsStore>,
+    telemetry: Arc<twitch_1337::schedule::TelemetryStore>,
 ) -> Result<twitch_1337::WebSpawner> {
     let bind_addr: std::net::SocketAddr = config
         .web
@@ -463,6 +423,7 @@ async fn build_web_spawner(
         ai_bootstrap: config.ai.clone().map(Arc::new),
         model_cache: Arc::new(twitch_1337_web::routes::ai_models::ModelListCache::default()),
         http: reqwest::Client::new(),
+        telemetry,
     };
 
     Ok(Box::new(move |shutdown| {
