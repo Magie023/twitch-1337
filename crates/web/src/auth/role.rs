@@ -3,7 +3,9 @@
 //! Ordered so `session.role >= required` is the gate predicate; inserting
 //! a new tier later means slotting it in at the right ordinal.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Role {
     Viewer,
     Mod,

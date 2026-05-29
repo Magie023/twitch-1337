@@ -474,3 +474,18 @@ document.body.addEventListener('change', (evt) => {
     syncCardEnabled(evt.target.closest('.settings-card'));
   }
 });
+
+// ─── Live character counters ─────────────────────────────────────────────────
+// Any `<textarea data-char-count maxlength=N>` gets a live "n / N" readout in
+// the sibling `[data-char-count-for]` within its `.row`; `.over` flags the cap.
+for (const ta of document.querySelectorAll('textarea[data-char-count]')) {
+  const counter = ta.closest('.row')?.querySelector('[data-char-count-for]');
+  if (!counter) continue;
+  const max = parseInt(ta.getAttribute('maxlength'), 10) || 500;
+  const render = () => {
+    counter.textContent = `${ta.value.length} / ${max}`;
+    counter.classList.toggle('over', ta.value.length >= max);
+  };
+  ta.addEventListener('input', render);
+  render();
+}

@@ -379,9 +379,26 @@ async fn build_web_spawner(
     )?);
 
     let web_clock = Arc::new(twitch_1337_web::clock::SystemClock);
-    let sessions = Arc::new(twitch_1337_web::auth::session::SessionTable::new(
+    // Disk-backed so a rolling deploy (bot restart) does not log every
+    // dashboard user out — the signed sid cookie keeps matching a live entry.
+    let sessions = Arc::new(twitch_1337_web::auth::session::SessionTable::load(
         web_clock.clone(),
+        get_data_dir().join("sessions.ron"),
     ));
+    // Periodic snapshot so the sliding `last_seen` survives a restart too,
+    // not just the login event. Login/logout persist immediately; this catches
+    // the in-between activity. 5 min is well under the default 2 h session TTL.
+    {
+        let sessions = sessions.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                sessions.persist().await;
+            }
+        });
+    }
 
     let web_config = Arc::new(twitch_1337_web::config::WebConfig {
         bind_addr: config.web.bind_addr.clone(),

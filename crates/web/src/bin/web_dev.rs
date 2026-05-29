@@ -113,6 +113,7 @@ async fn main() -> Result<()> {
         oauth,
         ping_actor,
         memory_store,
+        telemetry: twitch_1337_core::schedule::TelemetryStore::open(&data_dir),
         signed_key,
         leaderboard: Arc::new(RwLock::new(HashMap::new())),
         tracker_tx: None,

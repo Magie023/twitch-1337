@@ -12,12 +12,15 @@
 //! requests without a restart.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use eyre::Result;
 use rand::Rng as _;
+use serde::{Deserialize, Serialize};
+use twitch_1337_core::util::persist::atomic_save_ron_async;
 
 use crate::auth::role::Role;
 use crate::clock::Clock;
@@ -34,7 +37,7 @@ pub struct NewSession {
     pub is_broadcaster: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub user_id: String,
     pub user_login: String,
@@ -63,6 +66,15 @@ impl Session {
 pub struct SessionTable {
     inner: RwLock<HashMap<SessionId, Session>>,
     clock: Arc<dyn Clock>,
+    /// Backing file under `$DATA_DIR`. `None` keeps the table purely
+    /// in-memory (tests, web-dev bin) so they never touch disk.
+    path: Option<PathBuf>,
+    /// Serializes [`persist`](Self::persist) calls. `persist` is invoked from
+    /// three concurrent contexts (login, logout, the periodic snapshot task)
+    /// and `atomic_save_ron_async` always writes the same `.ron.tmp` sibling —
+    /// overlapping writes would tear that temp file. Holding this across the
+    /// whole snapshot+write makes the last writer win cleanly.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl SessionTable {
@@ -70,6 +82,65 @@ impl SessionTable {
         Self {
             inner: RwLock::new(HashMap::new()),
             clock,
+            path: None,
+            write_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Construct a disk-backed table, loading any previously persisted
+    /// sessions so a bot restart (every rolling deploy) does not log everyone
+    /// out — the signed sid cookie still matches a live table entry.
+    ///
+    /// A missing file starts empty; a corrupt/unparseable file is logged and
+    /// also starts empty, so a bad file costs at most one forced re-login
+    /// instead of wedging startup.
+    pub fn load(clock: Arc<dyn Clock>, path: PathBuf) -> Self {
+        let mut inner = match std::fs::read_to_string(&path) {
+            Ok(data) => match ron::from_str::<HashMap<SessionId, Session>>(&data) {
+                Ok(map) => map,
+                Err(error) => {
+                    tracing::warn!(?error, path = %path.display(), "Failed to parse sessions; starting empty");
+                    HashMap::new()
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => {
+                tracing::warn!(?error, path = %path.display(), "Failed to read sessions; starting empty");
+                HashMap::new()
+            }
+        };
+        // Force a fresh helix role re-check on the first request of every
+        // restored session. Without this a moderator demoted while the bot was
+        // down would keep dashboard access until `mod_check_refresh_secs`
+        // elapsed — the pre-persistence restart wiped sessions and re-evaluated
+        // roles at the forced re-login, and we must not regress that.
+        for s in inner.values_mut() {
+            s.last_role_check = DateTime::<Utc>::MIN_UTC;
+        }
+        Self {
+            inner: RwLock::new(inner),
+            clock,
+            path: Some(path),
+            write_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Snapshot the table and atomically write it to disk. No-op when the
+    /// table has no backing path.
+    ///
+    /// The whole snapshot+write runs under `write_lock` so concurrent callers
+    /// (login, logout, the periodic task) can't tear the shared `.ron.tmp`.
+    /// The snapshot is a quick clone under the `inner` read lock, which is
+    /// released before the disk `await`, so only the (already serialized)
+    /// writers wait — readers never block on IO.
+    pub async fn persist(&self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let _write = self.write_lock.lock().await;
+        let snapshot = self.inner.read().unwrap().clone();
+        if let Err(error) = atomic_save_ron_async(&snapshot, &path).await {
+            tracing::warn!(?error, "Failed to persist sessions");
         }
     }
 

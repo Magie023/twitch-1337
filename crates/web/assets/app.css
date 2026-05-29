@@ -1575,6 +1575,16 @@ textarea.input { resize: vertical; min-height: 140px; line-height: 1.6; }
   margin-top: 18px;
 }
 
+.char-count {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-4);
+  text-align: right;
+}
+.char-count.over { color: var(--danger); }
+
 .schedule-card {
   border: 1px solid var(--line);
   background: var(--bg-1);

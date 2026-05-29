@@ -10,8 +10,9 @@
   </div>
   <div class="row">
     <label>Message
-      <textarea name="message" rows="2" required>{{ form.message }}</textarea>
+      <textarea name="message" rows="2" required maxlength="500" data-char-count>{{ form.message }}</textarea>
     </label>
+    <output class="char-count" data-char-count-for>0 / 500</output>
   </div>
 
   <fieldset class="trigger-picker">
@@ -33,12 +34,12 @@
       </div>
       <div class="row">
         <label>Active from (Berlin, optional)
-          <input type="time" name="interval_active_from" value="{{ form.interval_active_from }}">
+          <input type="time" lang="de" name="interval_active_from" value="{{ form.interval_active_from }}">
         </label>
       </div>
       <div class="row">
         <label>Active to (Berlin, optional)
-          <input type="time" name="interval_active_to" value="{{ form.interval_active_to }}">
+          <input type="time" lang="de" name="interval_active_to" value="{{ form.interval_active_to }}">
         </label>
       </div>
       <div class="row">Days (empty = every day):</div>
@@ -61,7 +62,7 @@
     <div class="trigger-fields" data-for="calendar">
       <div class="row">
         <label>At (Berlin local time)
-          <input type="time" name="calendar_at" value="{{ form.calendar_at }}">
+          <input type="time" lang="de" name="calendar_at" value="{{ form.calendar_at }}">
         </label>
       </div>
       <div class="row">Days (empty = every day):</div>
@@ -79,12 +80,12 @@
 
   <div class="row">
     <label>Start date (Berlin, optional — inclusive)
-      <input type="date" name="start_date" value="{{ form.start_date }}">
+      <input type="date" lang="de" name="start_date" value="{{ form.start_date }}">
     </label>
   </div>
   <div class="row">
     <label>End date (Berlin, optional — inclusive)
-      <input type="date" name="end_date" value="{{ form.end_date }}">
+      <input type="date" lang="de" name="end_date" value="{{ form.end_date }}">
     </label>
   </div>
   <div class="row">

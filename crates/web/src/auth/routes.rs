@@ -370,6 +370,7 @@ async fn callback(
             is_broadcaster: me.id == *state.broadcaster_id,
         })
         .map_err(WebError::Internal)?;
+    state.sessions.persist().await;
     if let Some(url) = &me.profile_image_url {
         state
             .avatar_cache
@@ -422,6 +423,7 @@ async fn logout(
         return Err(WebError::CsrfMismatch);
     }
     state.sessions.drop_session(&sid);
+    state.sessions.persist().await;
     cookies.remove(Cookie::build(SID_COOKIE).path("/").build());
     cookies.remove(Cookie::build(CSRF_COOKIE).path("/").build());
     Ok(Redirect::to("/login").into_response())

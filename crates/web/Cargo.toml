@@ -11,6 +11,7 @@ arc-swap = { workspace = true }
 askama = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+axum-extra = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 eyre = { workspace = true }
@@ -19,6 +20,7 @@ http = "1"
 mime_guess = { workspace = true }
 oauth2 = { workspace = true }
 rand = { workspace = true }
+ron = { workspace = true }
 reqwest = { workspace = true }
 rust-embed = { workspace = true }
 secrecy = { workspace = true }

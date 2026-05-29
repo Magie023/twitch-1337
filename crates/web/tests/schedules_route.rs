@@ -103,6 +103,42 @@ async fn add_schedule_persists_and_renders() {
     assert_eq!(v[0].name, "noon");
 }
 
+/// A calendar schedule with exactly ONE weekday selected sends a single
+/// `calendar_days=Thu` field. Plain `axum::Form` (serde_urlencoded) rejected
+/// that as "invalid type: string, expected a sequence"; the `axum_extra` Form
+/// extractor parses a lone occurrence into a 1-element Vec.
+#[tokio::test]
+async fn add_calendar_schedule_with_single_weekday() {
+    install_crypto();
+    let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    let (sid, csrf_cookie, bare_csrf) = insert_session(&state, "999", "mod");
+    let app = build_router(state.clone());
+
+    let body = format!(
+        "_csrf={csrf}&name=thurs&message=hi&kind=calendar&calendar_at=13%3A37&calendar_days=Thu&start_date=&end_date=&enabled=true",
+        csrf = urlencoding::encode(&bare_csrf),
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/schedules/add")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let v = state.settings.load().schedules.clone();
+    assert_eq!(v.len(), 1);
+    match &v[0].trigger {
+        Trigger::Calendar { days, .. } => {
+            assert!(days.contains(chrono::Weekday::Thu), "Thu must be set");
+            assert!(!days.contains(chrono::Weekday::Mon), "only Thu selected");
+        }
+        other => panic!("expected calendar trigger, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn edit_schedule_renames() {
     install_crypto();
@@ -153,6 +189,59 @@ async fn edit_duplicate_name_returns_error_without_persisting() {
     assert_eq!(v.len(), 2, "no row may be renamed on validation failure");
     assert!(v.iter().any(|s| s.name == "a"));
     assert!(v.iter().any(|s| s.name == "b"));
+}
+
+/// A create that fails store-level validation (duplicate name) must restore
+/// the editable form with the user's input — NOT render an interactive card
+/// for the rejected, never-persisted row (clicking such a card targeted a
+/// nonexistent schedule and made the whole thing vanish).
+#[tokio::test]
+async fn create_duplicate_name_restores_form_without_phantom_card() {
+    install_crypto();
+    let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    seed_schedules(&state, vec![interval_schedule("dup", "original")]).await;
+    let (sid, csrf_cookie, bare_csrf) = insert_session(&state, "999", "mod");
+    let app = build_router(state.clone());
+
+    let body = interval_form(&bare_csrf, "dup", "keepme");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/schedules/add")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status().as_u16(),
+        200,
+        "validation error re-renders, not 303"
+    );
+
+    let v = state.settings.load().schedules.clone();
+    assert_eq!(v.len(), 1, "rejected row must not persist");
+
+    let html = body_string(res).await;
+    // Form restored with the submitted message so the user can fix the name.
+    assert!(
+        html.contains("action=\"/schedules/add\""),
+        "new-schedule form must be restored"
+    );
+    assert!(html.contains("keepme"), "submitted input must be preserved");
+    // Exactly one card for "dup" — the persisted one. A phantom card for the
+    // rejected attempt would push this to two.
+    assert_eq!(
+        html.matches("/schedules/dup/toggle").count(),
+        1,
+        "no phantom card for the unsaved row"
+    );
+    // The error still surfaces, but attributed to the form (global), not a
+    // phantom "row 1" that exceeds the single persisted card.
+    assert!(html.contains("Validation failed"), "error must be shown");
+    assert!(
+        !html.contains("row 1"),
+        "no phantom row reference for the unsaved attempt"
+    );
 }
 
 #[tokio::test]
