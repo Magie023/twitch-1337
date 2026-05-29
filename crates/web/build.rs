@@ -21,6 +21,9 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// build-arg (the `.dockerignore` strips `.git/`, so `git` would fail
 /// inside the container). Local cargo runs fall back to `git rev-parse`,
 /// then to `unknown` if both miss.
+///
+/// NOTE: `git_sha` + `build_num` are duplicated in `crates/core/build.rs`
+/// (cargo can't share build-script code across crates) — keep both in sync.
 fn git_sha() -> String {
     if let Ok(sha) = env::var("GIT_SHA")
         && !sha.is_empty()

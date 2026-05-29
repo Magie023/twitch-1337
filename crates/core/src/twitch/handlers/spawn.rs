@@ -117,6 +117,8 @@ pub(crate) struct SpawnDeps<T: Transport, L: LoginCredentials> {
     /// Per-schedule runtime telemetry. Shared with the dashboard so card
     /// chips ("12 today", "12m ago") read live data.
     pub telemetry: Arc<crate::schedule::TelemetryStore>,
+    /// Process start instant, captured in `run_bot`; forwarded to `!v`.
+    pub started_at: std::time::Instant,
 }
 
 /// Spawn every long-running handler task in the order they currently
@@ -155,6 +157,7 @@ where
         settings_store,
         primary_history_tap,
         telemetry,
+        started_at,
     } = deps;
 
     let ping_actor = tokio::spawn(run_ping_actor(ping_actor_rx, ping_manager, ping_names_tx));
@@ -282,6 +285,7 @@ where
                 suspension_manager: suspension_manager.clone(),
                 emote_provider,
                 primary_history_tap,
+                started_at,
             })
             .await;
         }
@@ -299,11 +303,21 @@ where
     }
 }
 
+/// Why [`await_shutdown`] returned. Lets the caller distinguish an intentional
+/// stop from a fault so the admin-channel announce matches reality.
+pub(crate) enum ShutdownOutcome {
+    /// The shutdown signal (Ctrl+C / SIGTERM) fired — intentional, graceful exit.
+    Graceful,
+    /// A handler task exited unexpectedly — the bot is faulting, not a clean stop.
+    HandlerExited,
+}
+
 /// Awaits whichever happens first: shutdown signal, or any handler exiting.
 ///
 /// On shutdown, notifies `shutdown_notify` (so the scheduled-message handler
 /// drains in-flight `say()` calls) and waits up to 5s for the scheduled
-/// handler before returning.
+/// handler before returning. Returns the ping-actor handle plus a
+/// [`ShutdownOutcome`] telling the caller whether the exit was graceful.
 ///
 /// The scheduled-message handler subscribes directly to
 /// `SettingsStore::change_notify` and reconciles per-schedule tasks
@@ -311,7 +325,7 @@ where
 pub(crate) async fn await_shutdown(
     handlers: HandlerSet,
     shutdown: oneshot::Receiver<()>,
-) -> tokio::task::JoinHandle<()> {
+) -> (tokio::task::JoinHandle<()>, ShutdownOutcome) {
     let HandlerSet {
         router,
         latency,
@@ -323,7 +337,7 @@ pub(crate) async fn await_shutdown(
         shutdown_notify,
     } = handlers;
 
-    tokio::select! {
+    let outcome = tokio::select! {
         _ = shutdown => {
             info!("Shutdown signal received, exiting gracefully");
             // Always wake any waiters (scheduled messages, web dashboard).
@@ -331,15 +345,16 @@ pub(crate) async fn await_shutdown(
             if let Err(e) = timeout(Duration::from_secs(5), &mut sched).await {
                 warn!(?e, "Scheduled message handler did not shut down within 5s");
             }
+            ShutdownOutcome::Graceful
         }
-        result = router => { error!("Message router exited unexpectedly: {result:?}"); }
-        result = tracker_1337 => { error!("1337 handler exited unexpectedly: {result:?}"); }
-        result = generic_commands => { error!("Generic Command Handler exited unexpectedly: {result:?}"); }
-        result = latency => { error!("Latency handler exited unexpectedly: {result:?}"); }
-        result = flight_tracker => { error!("Flight tracker exited unexpectedly: {result:?}"); }
-        result = &mut ping_actor => { error!("Ping actor exited unexpectedly: {result:?}"); }
-        result = &mut sched => { error!("Scheduled message handler exited unexpectedly: {result:?}"); }
-    }
+        result = router => { error!("Message router exited unexpectedly: {result:?}"); ShutdownOutcome::HandlerExited }
+        result = tracker_1337 => { error!("1337 handler exited unexpectedly: {result:?}"); ShutdownOutcome::HandlerExited }
+        result = generic_commands => { error!("Generic Command Handler exited unexpectedly: {result:?}"); ShutdownOutcome::HandlerExited }
+        result = latency => { error!("Latency handler exited unexpectedly: {result:?}"); ShutdownOutcome::HandlerExited }
+        result = flight_tracker => { error!("Flight tracker exited unexpectedly: {result:?}"); ShutdownOutcome::HandlerExited }
+        result = &mut ping_actor => { error!("Ping actor exited unexpectedly: {result:?}"); ShutdownOutcome::HandlerExited }
+        result = &mut sched => { error!("Scheduled message handler exited unexpectedly: {result:?}"); ShutdownOutcome::HandlerExited }
+    };
 
-    ping_actor
+    (ping_actor, outcome)
 }

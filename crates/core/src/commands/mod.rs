@@ -18,6 +18,7 @@ pub mod pb;
 pub mod ping_admin;
 pub mod ping_trigger;
 pub mod suspend;
+pub mod version;
 
 /// German rejection reply used by admin-gated commands when the sender
 /// lacks the required badge or id.

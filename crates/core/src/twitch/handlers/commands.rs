@@ -55,6 +55,8 @@ pub struct CommandHandlerConfig<T: Transport, L: LoginCredentials> {
     /// `ChatHistory` `Arc` is stored here so integration tests can peek at
     /// chat-history entries. Production wires `None`.
     pub primary_history_tap: Option<Arc<tokio::sync::Mutex<Option<ChatHistory>>>>,
+    /// Process start instant, captured in `run_bot`. Used by `!v` for uptime.
+    pub started_at: std::time::Instant,
 }
 
 /// Handler for generic text commands that start with `!`.
@@ -87,6 +89,7 @@ where
         suspension_manager,
         emote_provider,
         primary_history_tap,
+        started_at,
     } = cfg;
 
     let ping_handle = PingHandle::new(ping_actor_tx);
@@ -156,6 +159,7 @@ where
     };
 
     let mut cmd_list: Vec<Box<dyn commands::Command<T, L>>> = vec![
+        Box::new(commands::version::VersionCommand::new(started_at)),
         Box::new(commands::ping_admin::PingAdminCommand::new(
             ping_handle.clone(),
             settings.clone(),

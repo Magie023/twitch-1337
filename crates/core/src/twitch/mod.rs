@@ -1,3 +1,4 @@
+pub mod announce;
 pub mod chat_sender;
 pub mod handlers;
 pub mod setup;

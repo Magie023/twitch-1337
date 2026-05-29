@@ -4,7 +4,7 @@ Guide Claude Code work repo.
 
 ## Project
 
-Rust Twitch IRC bot. Features: 1337 tracker (13:37 Berlin), leaderboard (`!lb`), ping system (`!p`, `!<ping>`), scheduled messages (config.toml), latency monitor, AI (`!ai`, OpenAI/Ollama), flight tracker (`!track`, `!untrack`, `!flight`, `!flights`), aviation lookups (`!up`, `!fl`), feedback (`!fb`).
+Rust Twitch IRC bot. Features: 1337 tracker (13:37 Berlin), leaderboard (`!lb`), ping system (`!p`, `!<ping>`), scheduled messages (config.toml), latency monitor, AI (`!ai`, OpenAI/Ollama), flight tracker (`!track`, `!untrack`, `!flight`, `!flights`), aviation lookups (`!up`, `!fl`), feedback (`!fb`), version (`!v`).
 
 Single persistent IRC connection, broadcast channel routes to independent handler tasks.
 
