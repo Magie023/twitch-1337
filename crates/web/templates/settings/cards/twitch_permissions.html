@@ -18,6 +18,7 @@
         <div class="row-hint">Twitch user IDs (one per line). Treated as mods for admin-only commands without requiring mod role.</div>
       </div>
       <div class="row-control-cell">
+        <span class="row-pretty" aria-hidden="true">{% if current.twitch.hidden_admins.is_empty() %}<span class="muted">(empty)</span>{% else %}{{ current.twitch.hidden_admins.join(", ") }}{% endif %}</span>
         <textarea class="text-input is-wide" rows="4" name="twitch_hidden_admins" data-key="hidden_admins" data-default="">{{ current.twitch.hidden_admins.join("\n") }}</textarea>
       </div>
       <div class="row-right">
@@ -31,6 +32,7 @@
         <div class="row-hint">Twitch user IDs (one per line) granted read-only dashboard access.</div>
       </div>
       <div class="row-control-cell">
+        <span class="row-pretty" aria-hidden="true">{% if current.twitch.viewer_allowlist.is_empty() %}<span class="muted">(empty)</span>{% else %}{{ current.twitch.viewer_allowlist.join(", ") }}{% endif %}</span>
         <textarea class="text-input is-wide" rows="4" name="twitch_viewer_allowlist" data-key="viewer_allowlist" data-default="">{{ current.twitch.viewer_allowlist.join("\n") }}</textarea>
       </div>
       <div class="row-right">

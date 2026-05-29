@@ -426,6 +426,67 @@ async fn settings_page_renders_all_ai_cards() {
 }
 
 #[tokio::test]
+async fn permissions_lists_render_pretty_resting_display() {
+    // hidden_admins / viewer_allowlist are the only multi-line (textarea) rows.
+    // Like every other settings row they must carry a `.row-pretty` overlay so
+    // the value is visible at rest (controls are opacity:0 until hover). The
+    // textarea renders IDs newline-joined ("111\n222"); only the pretty span
+    // renders them comma-joined ("111, 222"), so finding that proves the span.
+    install_crypto();
+    let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    set_owner(&state, Some("123"));
+    let (sid, csrf_cookie, bare_csrf) = insert_session_as(&state, "123", "owner", Role::Owner);
+
+    // Seed both permission lists via POST.
+    let defaults = state.settings_store.defaults().clone();
+    let app = build_router(state.clone());
+    let body = format!(
+        "_csrf={csrf}&cooldown_ai={ai}&cooldown_news={n}&cooldown_up={u}&cooldown_feedback={f}&cooldown_doener={d}&ping_cooldown={p}&twitch_hidden_admins={ha}&twitch_viewer_allowlist={va}",
+        csrf = urlencoding::encode(&bare_csrf),
+        ai = defaults.cooldowns.ai,
+        n = defaults.cooldowns.news,
+        u = defaults.cooldowns.up,
+        f = defaults.cooldowns.feedback,
+        d = defaults.cooldowns.doener,
+        p = defaults.pings.cooldown,
+        ha = urlencoding::encode("111\n222"),
+        va = urlencoding::encode("333\n444"),
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // GET and confirm the pretty (comma-joined) display is present.
+    let app = build_router(state);
+    let req = Request::builder()
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = body_string(res).await;
+    assert!(
+        html.contains("row-pretty"),
+        "permissions rows must carry a .row-pretty overlay"
+    );
+    assert!(
+        html.contains("111, 222"),
+        "hidden_admins must render a comma-joined pretty display"
+    );
+    assert!(
+        html.contains("333, 444"),
+        "viewer_allowlist must render a comma-joined pretty display"
+    );
+}
+
+#[tokio::test]
 async fn settings_page_shows_openrouter_tiers_for_default_base_url() {
     // The OpenAI-compatible client defaults an empty base URL to OpenRouter.
     // The dashboard must expose OpenRouter-only controls for that effective

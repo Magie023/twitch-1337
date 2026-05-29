@@ -144,6 +144,12 @@ document.addEventListener(
     const unit = prettyEl?.dataset.prettyUnit ?? '';
     if (unit === 'bytes' || unit === 'B') return formatBytesIec(input.value);
     if (unit === 'bool') return input.checked ? 'On' : 'Off';
+    if (input.tagName === 'TEXTAREA') {
+      // ID-list rows: mirror the server's comma-joined pretty (textarea holds
+      // one ID per line). Falls through to (empty) when blank.
+      const ids = input.value.split('\n').map((l) => l.trim()).filter(Boolean);
+      return ids.length ? ids.join(', ') : '(empty)';
+    }
     if (input.type === 'text' || input.type === 'time' || input.type === 'email' || input.type === 'url') {
       return input.value || (input.placeholder ? `(${input.placeholder})` : '');
     }
@@ -214,10 +220,11 @@ document.addEventListener(
       r.el.classList.toggle('is-dirty', dirty);
       if (r.reset) r.reset.hidden = !offDefault;
       if (r.pretty) {
-        const isText = ['text', 'time', 'email', 'url'].includes(r.input.type);
-        // Server already renders nuanced markup (placeholder/empty muted span)
-        // for text-type rows; only overwrite the pretty when the user has
-        // edited the value, otherwise leave the SSR markup intact.
+        const isText = ['text', 'time', 'email', 'url', 'textarea'].includes(r.input.type);
+        // Server already renders nuanced markup (placeholder/empty muted span,
+        // comma-joined ID lists for textareas) for text-type rows; only
+        // overwrite the pretty when the user has edited the value, otherwise
+        // leave the SSR markup intact.
         if (!isText || dirty) r.pretty.textContent = formatPretty(r.input, r.pretty);
       }
       if (r.input.type === 'range') {
