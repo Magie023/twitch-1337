@@ -343,6 +343,8 @@ mod tests {
             geom_rate: None,
             squawk: Some("1000".to_string()),
             nav_modes: None,
+            rssi: None,
+            seen_pos: None,
         }
     }
 

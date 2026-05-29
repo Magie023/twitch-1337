@@ -29,6 +29,8 @@ pub struct NearbyAircraft {
     pub geom_rate: Option<i64>,
     pub squawk: Option<String>,
     pub nav_modes: Option<Vec<String>>,
+    pub rssi: Option<f64>,
+    pub seen_pos: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,4 +231,29 @@ fn parse_aviationstack_datetime(value: Option<&str>) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nearby_aircraft_deserializes_signal_fields() {
+        let ac: NearbyAircraft = serde_json::from_value(serde_json::json!({
+            "hex": "3c6589",
+            "rssi": -11.5,
+            "seen_pos": 0.7
+        }))
+        .unwrap();
+        assert_eq!(ac.rssi, Some(-11.5));
+        assert_eq!(ac.seen_pos, Some(0.7));
+    }
+
+    #[test]
+    fn nearby_aircraft_signal_fields_default_to_none_when_absent() {
+        let ac: NearbyAircraft =
+            serde_json::from_value(serde_json::json!({ "hex": "3c6589" })).unwrap();
+        assert_eq!(ac.rssi, None);
+        assert_eq!(ac.seen_pos, None);
+    }
 }
