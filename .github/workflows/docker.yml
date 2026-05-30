@@ -21,6 +21,7 @@ jobs:
       packages: write
     env:
       DOCKHAND_WEBHOOK_URL: ${{ secrets.DOCKHAND_WEBHOOK_URL }}
+      DOCKHAND_WEBHOOK_SECRET: ${{ secrets.DOCKHAND_WEBHOOK_SECRET }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -59,8 +60,15 @@ jobs:
 
       # Tell dockhand the new :latest is live so it pulls + redeploys.
       # Fires only after a successful push; no-ops if the secret is unset.
-      # URL carries the stack token as a query param — keep it in env so it
-      # never lands in a `${{ }}`-expanded run line or the step log.
+      # Auth: GitLab-style plain token header (X-Gitlab-Token). Configure the
+      # dockhand stack webhook with the matching secret, and enable
+      # force-redeploy there — a :latest push is not a new git commit, so
+      # without it dockhand returns {"skipped":true} and never restarts.
+      # URL + secret stay in env so they never land in a `${{ }}`-expanded
+      # run line or the step log.
       - name: Trigger dockhand redeploy
         if: ${{ env.DOCKHAND_WEBHOOK_URL != '' }}
-        run: curl -fsS -X POST "$DOCKHAND_WEBHOOK_URL"
+        run: |
+          curl -fsS -X POST \
+            -H "X-Gitlab-Token: $DOCKHAND_WEBHOOK_SECRET" \
+            "$DOCKHAND_WEBHOOK_URL"
