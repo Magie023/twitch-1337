@@ -307,3 +307,23 @@ pub fn set_owner(state: &WebState, owner: Option<&str>) {
         .owner
         .store(std::sync::Arc::new(owner.map(str::to_owned)));
 }
+
+/// Returns a `FakeHelix` where `user_id` is both a known user and a moderator.
+/// Used by harness / route tests to make the periodic mod-recheck pass without
+/// a real Helix API call.
+pub fn admin_helix(user_id: &str) -> Arc<dyn HelixClient> {
+    let mut users = HashMap::new();
+    users.insert(
+        user_id.to_owned(),
+        HelixUser {
+            id: user_id.to_owned(),
+            login: "admin".into(),
+            display_name: "admin".into(),
+            profile_image_url: None,
+        },
+    );
+    Arc::new(FakeHelix {
+        moderators: vec![user_id.to_owned()],
+        users,
+    })
+}

@@ -74,6 +74,17 @@ dev-web-shot path="/pings" file="/tmp/wd.png" base="http://127.0.0.1:8761":
   @chromium --headless=new --no-sandbox --disable-gpu --hide-scrollbars --window-size=1400,900 --user-data-dir=/tmp/wd-cprof --virtual-time-budget=4000 --screenshot={{file}} "{{base}}/_dev/login?next={{path}}" 2>&1 | tail -1
   @echo "shot {{base}}{{path}} -> {{file}}"
 
+# Run browser e2e tests. Starts chromedriver on :9515 if not already up.
+# Requires chromedriver + Chrome installed and version-matched.
+e2e:
+  @if ! curl -sf http://localhost:9515/status >/dev/null 2>&1; then \
+      echo "starting chromedriver on :9515"; \
+      chromedriver --port=9515 & \
+      for _ in $(seq 1 30); do curl -sf http://localhost:9515/status >/dev/null && break; sleep 0.3; done; \
+      curl -sf http://localhost:9515/status >/dev/null || { echo "chromedriver did not start (is it installed?)"; exit 1; }; \
+  fi
+  WEBDRIVER_URL=http://localhost:9515 cargo nextest run -p twitch-1337-web --features e2e
+
 # Run tests with minimal output
 test-brief:
     @cargo test --workspace --quiet 2>&1 | grep "test result" | awk ' \

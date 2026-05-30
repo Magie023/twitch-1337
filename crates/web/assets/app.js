@@ -1,7 +1,7 @@
 const CSRF_COOKIE_RE = /(?:^|; )tw1337_csrf=([^;]+)/;
 
 document.body.addEventListener('htmx:configRequest', (evt) => {
-  if (evt.detail.verb !== 'get') {
+  if (evt.detail.verb !== 'get' && !evt.detail.headers['X-Csrf-Token']) {
     const m = document.cookie.match(CSRF_COOKIE_RE);
     if (m) evt.detail.headers['X-Csrf-Token'] = decodeURIComponent(m[1]);
   }

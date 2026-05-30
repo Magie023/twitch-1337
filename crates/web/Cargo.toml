@@ -44,6 +44,13 @@ notify-debouncer-mini = { version = "0.7", optional = true }
 # can mint a moderator session without OAuth.
 dev-login = ["dep:tower-livereload", "dep:notify-debouncer-mini"]
 
+# Compile-gate for the browser e2e test target (crates/web/tests/e2e.rs):
+# without `--features e2e` the e2e test binary is not built or run. The CI
+# `e2e` job and `just e2e` pass it. (Note: `fantoccini` is a plain dev-dep, so
+# it still compiles for any web-crate test build — only the e2e *target* is
+# gated.)
+e2e = []
+
 # Standalone dashboard runner — skips IRC, uses StubHelix.
 # `cargo run -p twitch-1337-web --bin web-dev --features dev-login`
 [[bin]]
@@ -53,6 +60,7 @@ required-features = ["dev-login"]
 
 [dev-dependencies]
 arc-swap = { workspace = true }
+fantoccini = { version = "0.22", default-features = false, features = ["rustls-tls"] }
 rustls = { workspace = true }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
@@ -60,3 +68,8 @@ wiremock = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["e2e"]
