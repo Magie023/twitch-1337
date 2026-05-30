@@ -53,3 +53,8 @@ ai_memory.ron
 
 # Local dev data (just dev)
 /dev-data/
+
+# Stack bind-mount data (compose `./data:/data`) — created at deploy,
+# never committed. dockhand clones this repo into git-repos/<env> and
+# `./data` resolves relative to that compose dir.
+/data/

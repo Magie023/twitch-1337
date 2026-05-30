@@ -1,0 +1,25 @@
+services:
+  twitch-1337:
+    restart: always
+    image: ghcr.io/chronophylos/twitch-1337:latest
+    pull_policy: always
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./data:/data
+    networks:
+      - default
+      - shared
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - default
+
+networks:
+  shared:
+    external: true
