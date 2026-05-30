@@ -173,33 +173,3 @@ pub(crate) fn next_poll_at(flights: &[TrackedFlight], now: DateTime<Utc>) -> Opt
         })
         .min()
 }
-
-#[allow(dead_code)]
-pub(crate) fn compute_poll_interval(flights: &[TrackedFlight]) -> Duration {
-    if flights.is_empty() || flights.iter().all(is_pending_adsb) {
-        return POLL_SLOW;
-    }
-
-    let needs_fast = flights.iter().filter(|f| !is_pending_adsb(f)).any(|f| {
-        f.polls_since_change < 5
-            || matches!(
-                f.phase,
-                FlightPhase::Takeoff | FlightPhase::Approach | FlightPhase::Landing
-            )
-    });
-
-    if needs_fast {
-        return POLL_FAST;
-    }
-
-    let needs_normal = flights
-        .iter()
-        .filter(|f| !is_pending_adsb(f))
-        .any(|f| matches!(f.phase, FlightPhase::Climb | FlightPhase::Descent));
-
-    if needs_normal {
-        return POLL_NORMAL;
-    }
-
-    POLL_SLOW
-}

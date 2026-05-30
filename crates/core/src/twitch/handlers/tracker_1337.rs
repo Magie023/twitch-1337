@@ -217,7 +217,10 @@ pub(crate) fn generate_stats_message(count: usize, user_list: &[String]) -> Stri
 ///
 /// Used for adding variety to bot responses by randomly selecting from predefined options.
 pub(crate) fn one_of<const L: usize, T>(array: &[T; L]) -> &T {
-    array.choose(&mut rand::rng()).unwrap()
+    const { assert!(L > 0, "one_of requires a non-empty array") };
+    array
+        .choose(&mut rand::rng())
+        .expect("L > 0 asserted above")
 }
 
 /// Small-chance meme overrides keyed to specific counts. Each qualifying rule

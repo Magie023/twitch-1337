@@ -4,7 +4,6 @@ CHRONO_TZ_TIMEZONE_FILTER = "Europe/Berlin"
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
-share-generics = true
 
 [profile.dev.package."*"]
 debug = false
