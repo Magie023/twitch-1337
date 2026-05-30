@@ -19,6 +19,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKHAND_WEBHOOK_URL: ${{ secrets.DOCKHAND_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -54,3 +56,11 @@ jobs:
             BUILD_NUM=${{ env.BUILD_NUM }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Tell dockhand the new :latest is live so it pulls + redeploys.
+      # Fires only after a successful push; no-ops if the secret is unset.
+      # URL carries the stack token as a query param — keep it in env so it
+      # never lands in a `${{ }}`-expanded run line or the step log.
+      - name: Trigger dockhand redeploy
+        if: ${{ env.DOCKHAND_WEBHOOK_URL != '' }}
+        run: curl -fsS -X POST "$DOCKHAND_WEBHOOK_URL"
