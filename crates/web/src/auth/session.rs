@@ -214,3 +214,142 @@ impl SessionTable {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// Manually-advanced clock so TTL behaviour is deterministic.
+    struct TestClock {
+        now: Mutex<DateTime<Utc>>,
+    }
+
+    impl TestClock {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                now: Mutex::new(DateTime::<Utc>::UNIX_EPOCH),
+            })
+        }
+        fn advance(&self, by: Duration) {
+            let mut g = self.now.lock().unwrap();
+            *g += chrono::Duration::from_std(by).unwrap();
+        }
+    }
+
+    impl Clock for TestClock {
+        fn now(&self) -> DateTime<Utc> {
+            *self.now.lock().unwrap()
+        }
+    }
+
+    fn sample_session() -> NewSession {
+        NewSession {
+            user_id: "u1".to_owned(),
+            user_login: "login1".to_owned(),
+            role: Role::Mod,
+            avatar_url: None,
+            is_broadcaster: false,
+        }
+    }
+
+    const TTL: Duration = Duration::from_secs(3600);
+
+    #[test]
+    fn get_and_touch_returns_live_session() {
+        let clock = TestClock::new();
+        let table = SessionTable::new(clock);
+        table.insert_at("sid", [0u8; 32], sample_session());
+
+        let got = table.get_and_touch("sid", TTL).expect("session is live");
+        assert_eq!(got.user_id, "u1");
+        assert_eq!(got.role, Role::Mod);
+    }
+
+    #[test]
+    fn get_and_touch_unknown_id_is_none() {
+        let table = SessionTable::new(TestClock::new());
+        assert!(table.get_and_touch("missing", TTL).is_none());
+    }
+
+    #[test]
+    fn expired_session_is_evicted() {
+        let clock = TestClock::new();
+        let table = SessionTable::new(clock.clone());
+        table.insert_at("sid", [0u8; 32], sample_session());
+
+        clock.advance(TTL + Duration::from_secs(1));
+        assert!(
+            table.get_and_touch("sid", TTL).is_none(),
+            "session past ttl must not validate"
+        );
+        // Prove the expired lookup *evicted* the entry rather than merely
+        // rejecting it: a still-present entry (last_seen at epoch) would
+        // validate against a 10-year ttl, but an evicted one stays gone.
+        let huge_ttl = Duration::from_secs(10 * 365 * 24 * 3600);
+        assert!(
+            table.get_and_touch("sid", huge_ttl).is_none(),
+            "expired session must be removed from the table, not just rejected"
+        );
+    }
+
+    #[test]
+    fn activity_slides_the_window() {
+        let clock = TestClock::new();
+        let table = SessionTable::new(clock.clone());
+        table.insert_at("sid", [0u8; 32], sample_session());
+
+        // Repeatedly touch just under the ttl; total elapsed exceeds one ttl
+        // but the session stays live because last_seen keeps moving forward.
+        for _ in 0..5 {
+            clock.advance(TTL - Duration::from_secs(1));
+            assert!(
+                table.get_and_touch("sid", TTL).is_some(),
+                "sliding window should keep an active session alive"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_session_removes_entry() {
+        let table = SessionTable::new(TestClock::new());
+        table.insert_at("sid", [0u8; 32], sample_session());
+        table.drop_session("sid");
+        assert!(table.get_and_touch("sid", TTL).is_none());
+    }
+
+    #[test]
+    fn record_role_check_stamps_current_time() {
+        let clock = TestClock::new();
+        let table = SessionTable::new(clock.clone());
+        table.insert_at("sid", [0u8; 32], sample_session());
+
+        clock.advance(Duration::from_secs(120));
+        table.record_role_check("sid");
+
+        let session = table.get_and_touch("sid", TTL).unwrap();
+        assert_eq!(
+            session.last_role_check,
+            DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::seconds(120)
+        );
+    }
+
+    #[test]
+    fn is_mod_tracks_role_tier() {
+        let mk = |role| Session {
+            user_id: "u".into(),
+            user_login: "l".into(),
+            role,
+            issued_at: DateTime::<Utc>::UNIX_EPOCH,
+            last_seen: DateTime::<Utc>::UNIX_EPOCH,
+            last_role_check: DateTime::<Utc>::UNIX_EPOCH,
+            csrf_value: [0u8; 32],
+            avatar_url: None,
+            is_broadcaster: false,
+        };
+        assert!(!mk(Role::Viewer).is_mod());
+        assert!(mk(Role::Mod).is_mod());
+        assert!(mk(Role::Owner).is_mod(), "owner is a superset of mod");
+    }
+}

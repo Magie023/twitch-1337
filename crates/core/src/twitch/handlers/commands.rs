@@ -487,3 +487,95 @@ pub(crate) async fn run_command_dispatcher<T, L>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Convenience: parse and return `(trigger, args)`, panicking on `None`.
+    fn parse(text: &str) -> (String, Vec<String>) {
+        let inv = command_invocation(text).expect("expected an invocation");
+        (
+            inv.trigger.to_owned(),
+            inv.args.iter().map(|s| (*s).to_owned()).collect(),
+        )
+    }
+
+    #[test]
+    fn empty_and_blank_yield_no_invocation() {
+        assert!(command_invocation("").is_none());
+        assert!(command_invocation("   \t ").is_none());
+    }
+
+    #[test]
+    fn plain_command_splits_trigger_and_args() {
+        let (trigger, args) = parse("!fl LH123 EDDF");
+        assert_eq!(trigger, "!fl");
+        assert_eq!(args, ["LH123", "EDDF"]);
+    }
+
+    #[test]
+    fn bare_command_has_no_args() {
+        let (trigger, args) = parse("!v");
+        assert_eq!(trigger, "!v");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn grok_alias_at_message_start() {
+        let (trigger, args) = parse(&format!("{GROK_ALIAS_TRIGGER} hello world"));
+        assert_eq!(trigger, GROK_ALIAS_TRIGGER);
+        assert_eq!(args, ["hello", "world"]);
+    }
+
+    #[test]
+    fn grok_alias_after_leading_mentions() {
+        let (trigger, args) = parse(&format!("@someone @other {GROK_ALIAS_TRIGGER} hi"));
+        assert_eq!(trigger, GROK_ALIAS_TRIGGER);
+        assert_eq!(args, ["hi"]);
+    }
+
+    #[test]
+    fn grok_alias_is_case_insensitive() {
+        let upper = GROK_ALIAS_TRIGGER.to_uppercase();
+        let (trigger, args) = parse(&format!("{upper} yo"));
+        // The original (upper-cased) word is returned verbatim as the trigger.
+        assert_eq!(trigger, upper);
+        assert_eq!(args, ["yo"]);
+    }
+
+    #[test]
+    fn non_mention_before_grok_disables_alias() {
+        // A non-mention word before the grok token means the grok-alias branch
+        // must not fire; the first word becomes the trigger instead.
+        let (trigger, args) = parse(&format!("hey {GROK_ALIAS_TRIGGER} hi"));
+        assert_eq!(trigger, "hey");
+        assert_eq!(args, [GROK_ALIAS_TRIGGER, "hi"]);
+    }
+
+    #[test]
+    fn builtin_command_is_not_shadowed_by_trailing_grok() {
+        // `!v @grok` must dispatch to `!v`, not the grok alias, since the
+        // leading `!v` is not a twitch mention.
+        let (trigger, args) = parse(&format!("!v {GROK_ALIAS_TRIGGER}"));
+        assert_eq!(trigger, "!v");
+        assert_eq!(args, [GROK_ALIAS_TRIGGER]);
+    }
+
+    #[test]
+    fn twitch_mention_recognises_valid_logins() {
+        assert!(is_twitch_mention("@abc_123"));
+        assert!(is_twitch_mention("@USER"));
+    }
+
+    #[test]
+    fn twitch_mention_rejects_malformed() {
+        assert!(!is_twitch_mention("@"), "bare @ is not a mention");
+        assert!(!is_twitch_mention("abc"), "missing @ prefix");
+        assert!(
+            !is_twitch_mention("@bad-char"),
+            "hyphen is not a login char"
+        );
+        assert!(!is_twitch_mention("@white space"), "space splits the word");
+    }
+}
