@@ -5,8 +5,14 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;
 
-pub const GIT_SHA: &str = env!("GIT_SHA_SHORT");
-pub const BUILD_NUM: &str = env!("BUILD_NUM");
+pub const GIT_SHA: &str = match option_env!("GIT_SHA_SHORT") {
+    Some(v) => v,
+    None => "unknown",
+};
+pub const BUILD_NUM: &str = match option_env!("BUILD_NUM") {
+    Some(v) => v,
+    None => "dev",
+};
 
 pub fn router(irc_connected: Arc<AtomicBool>) -> Router {
     Router::new().route(

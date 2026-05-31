@@ -19,7 +19,11 @@ const ANNOUNCE_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 /// `BUILD_NUM` already carries the `b` prefix in CI (e.g. `b123`, matching the
 /// image tag); emit it verbatim so we don't double it up (`bb123`).
 pub fn version_line() -> String {
-    format!("{} · {}", env!("BUILD_NUM"), env!("GIT_SHA_SHORT"))
+    format!(
+        "{} · {}",
+        option_env!("BUILD_NUM").unwrap_or("dev"),
+        option_env!("GIT_SHA_SHORT").unwrap_or("unknown")
+    )
 }
 
 /// Compact uptime: the first non-zero unit and up to two more non-zero units

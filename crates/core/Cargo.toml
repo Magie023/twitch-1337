@@ -52,7 +52,6 @@ twitch-1337-web = { path = "../web" }
 async-trait = "0.1"
 bytes = "1"
 either = "1"
-proptest = "1.11"
 reqwest = { workspace = true }
 tempfile = "3"
 tokio = { version = "1.52.1", features = ["test-util"] }
