@@ -47,6 +47,52 @@ pub struct PersonalBest {
     pub date: chrono::NaiveDate,
 }
 
+/// How a sub-second winning time ranks against the existing leaderboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Achievement {
+    /// Beats every existing entry — a new all-time record.
+    OverallRecord,
+    /// Beats the user's own previous best, but not the all-time record.
+    PersonalBest,
+    /// No improvement over the user's own previous best.
+    None,
+}
+
+/// Classifies a sub-second winning time (`ms`) against the leaderboard as it
+/// stood *before* today's update.
+///
+/// `OverallRecord` takes precedence over `PersonalBest`: beating the all-time
+/// fastest is always also a personal best, so the stronger label wins. A tie
+/// (equal `ms`) never counts as beating anything.
+pub(crate) fn classify_achievement(
+    user: &str,
+    ms: u64,
+    leaderboard: &HashMap<String, PersonalBest>,
+) -> Achievement {
+    let beats_record = leaderboard
+        .values()
+        .map(|pb| pb.ms)
+        .min()
+        .is_none_or(|record| ms < record);
+    if beats_record {
+        Achievement::OverallRecord
+    } else if beats_own_best(user, ms, leaderboard) {
+        Achievement::PersonalBest
+    } else {
+        Achievement::None
+    }
+}
+
+/// Whether `ms` improves on `user`'s own stored personal best — true when they
+/// beat it, or have no entry yet. Shared by the announce path and the
+/// leaderboard-update loop so the two never disagree on what counts as a PB.
+fn beats_own_best(user: &str, ms: u64, leaderboard: &HashMap<String, PersonalBest>) -> bool {
+    leaderboard
+        .get(user)
+        .map(|pb| pb.ms)
+        .is_none_or(|own| ms < own)
+}
+
 /// Calculates the next occurrence of a daily time in Europe/Berlin timezone.
 ///
 /// If the specified time has already passed today, returns tomorrow's occurrence.
@@ -464,12 +510,14 @@ pub async fn run_1337_handler<T, L>(
 
             if fastest_ms < 1000 {
                 let leaderboard_guard = leaderboard.read().await;
-                let previous_pb = leaderboard_guard.get(fastest_user).map(|pb| pb.ms);
-                let is_record = previous_pb.is_none_or(|best| fastest_ms < best);
+                let achievement =
+                    classify_achievement(fastest_user, fastest_ms, &leaderboard_guard);
                 drop(leaderboard_guard);
 
-                if is_record {
-                    message.push_str(" - neue PB!");
+                match achievement {
+                    Achievement::OverallRecord => message.push_str(" - neuer Rekord WICKED"),
+                    Achievement::PersonalBest => message.push_str(" - neue PB!"),
+                    Achievement::None => {}
                 }
             }
         }
@@ -494,20 +542,14 @@ pub async fn run_1337_handler<T, L>(
             let users = total_users.lock().await;
             let mut leaderboard_guard = leaderboard.write().await;
             for (username, ms) in users.iter() {
-                if *ms < 1000 {
-                    let update = match leaderboard_guard.get(username) {
-                        Some(existing) => *ms < existing.ms,
-                        None => true,
-                    };
-                    if update {
-                        leaderboard_guard.insert(
-                            username.clone(),
-                            PersonalBest {
-                                ms: *ms,
-                                date: today,
-                            },
-                        );
-                    }
+                if *ms < 1000 && beats_own_best(username, *ms, &leaderboard_guard) {
+                    leaderboard_guard.insert(
+                        username.clone(),
+                        PersonalBest {
+                            ms: *ms,
+                            date: today,
+                        },
+                    );
                 }
             }
             save_leaderboard(&leaderboard_guard, &data_dir).await;
@@ -518,5 +560,94 @@ pub async fn run_1337_handler<T, L>(
         sender.say(channel.clone(), message).await;
 
         info!("Daily 1337 session completed, waiting for next day");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+
+    use super::*;
+
+    fn lb(entries: &[(&str, u64)]) -> HashMap<String, PersonalBest> {
+        let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        entries
+            .iter()
+            .map(|(user, ms)| ((*user).to_string(), PersonalBest { ms: *ms, date }))
+            .collect()
+    }
+
+    #[test]
+    fn empty_leaderboard_first_sub_second_is_overall_record() {
+        assert_eq!(
+            classify_achievement("alice", 234, &lb(&[])),
+            Achievement::OverallRecord
+        );
+    }
+
+    #[test]
+    fn beating_every_entry_is_overall_record() {
+        let board = lb(&[("bob", 300), ("carol", 500)]);
+        assert_eq!(
+            classify_achievement("alice", 250, &board),
+            Achievement::OverallRecord
+        );
+    }
+
+    #[test]
+    fn beating_own_standing_record_is_overall_record() {
+        // alice already holds the all-time record; she lowers it further.
+        let board = lb(&[("alice", 200), ("bob", 400)]);
+        assert_eq!(
+            classify_achievement("alice", 150, &board),
+            Achievement::OverallRecord
+        );
+    }
+
+    #[test]
+    fn beating_own_best_but_not_the_record_is_personal_best() {
+        // bob holds the record at 100; alice improves her own 400 to 250.
+        let board = lb(&[("bob", 100), ("alice", 400)]);
+        assert_eq!(
+            classify_achievement("alice", 250, &board),
+            Achievement::PersonalBest
+        );
+    }
+
+    #[test]
+    fn first_time_on_populated_board_is_personal_best() {
+        let board = lb(&[("bob", 100)]);
+        assert_eq!(
+            classify_achievement("alice", 250, &board),
+            Achievement::PersonalBest
+        );
+    }
+
+    #[test]
+    fn no_improvement_over_own_best_is_none() {
+        let board = lb(&[("bob", 100), ("alice", 250)]);
+        assert_eq!(
+            classify_achievement("alice", 400, &board),
+            Achievement::None
+        );
+    }
+
+    #[test]
+    fn tying_own_best_is_none() {
+        let board = lb(&[("bob", 100), ("alice", 250)]);
+        assert_eq!(
+            classify_achievement("alice", 250, &board),
+            Achievement::None
+        );
+    }
+
+    #[test]
+    fn tying_the_record_is_personal_best_not_record() {
+        // Matching the all-time best is not beating it; alice has no prior entry.
+        let board = lb(&[("bob", 100)]);
+        assert_eq!(
+            classify_achievement("alice", 100, &board),
+            Achievement::PersonalBest
+        );
     }
 }

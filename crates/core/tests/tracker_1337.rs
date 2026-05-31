@@ -127,6 +127,88 @@ async fn tracker_1337_updates_leaderboard_with_sub_second_time() {
 }
 
 #[tokio::test]
+async fn tracker_1337_announces_overall_record_when_no_faster_entry_exists() {
+    let mut bot = TestBotBuilder::new()
+        .at(Berlin
+            .with_ymd_and_hms(2026, 4, 18, 13, 35, 0)
+            .unwrap()
+            .with_timezone(&chrono::Utc))
+        .spawn()
+        .await;
+
+    advance_to_1337_window(&mut bot).await;
+
+    // Empty leaderboard: any sub-second time is the new all-time record.
+    let msg_alice = privmsg_at(&bot.channel, "alice", "1337", TMI_TS_13_37_BERLIN + 234);
+    bot.transport
+        .inject
+        .send(msg_alice)
+        .await
+        .expect("inject alice");
+    yield_a_bit().await;
+
+    bot.clock.advance(ChronoDuration::seconds(90));
+    yield_a_bit().await;
+
+    let stats = bot.expect_say(Duration::from_secs(3)).await;
+    assert!(
+        stats.contains("neuer Rekord"),
+        "expected overall-record announce, got: {stats}"
+    );
+    assert!(
+        !stats.contains("neue PB!"),
+        "record should not be downgraded to a plain PB, got: {stats}"
+    );
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
+async fn tracker_1337_announces_personal_best_when_record_is_held_by_another() {
+    use chrono::NaiveDate;
+    use common::seed_leaderboard;
+
+    let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    // bob holds the all-time record; alice has a slower standing best.
+    let seeded = seed_leaderboard(&[("bob", 100, date), ("alice", 400, date)]);
+
+    let mut bot = TestBotBuilder::new()
+        .at(Berlin
+            .with_ymd_and_hms(2026, 4, 18, 13, 35, 0)
+            .unwrap()
+            .with_timezone(&chrono::Utc))
+        .with_seeded_leaderboard(seeded)
+        .spawn()
+        .await;
+
+    advance_to_1337_window(&mut bot).await;
+
+    // alice improves her own best (400 → 250) but does not beat bob's 100ms record.
+    let msg_alice = privmsg_at(&bot.channel, "alice", "1337", TMI_TS_13_37_BERLIN + 250);
+    bot.transport
+        .inject
+        .send(msg_alice)
+        .await
+        .expect("inject alice");
+    yield_a_bit().await;
+
+    bot.clock.advance(ChronoDuration::seconds(90));
+    yield_a_bit().await;
+
+    let stats = bot.expect_say(Duration::from_secs(3)).await;
+    assert!(
+        stats.contains("neue PB!"),
+        "expected personal-best announce, got: {stats}"
+    );
+    assert!(
+        !stats.contains("neuer Rekord"),
+        "beating only one's own best must not announce a record, got: {stats}"
+    );
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
 async fn tracker_1337_posts_slowest_only_for_final_ten_seconds() {
     let mut bot = TestBotBuilder::new()
         .at(Berlin
