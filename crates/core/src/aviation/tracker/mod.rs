@@ -99,6 +99,33 @@ pub enum FlightPhase {
     Landing,
 }
 
+/// Where the currently stored ICAO24 hex came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HexSource {
+    UserInput,
+    AviationStack,
+    Adsb,
+}
+
+/// How confidently the observed ADS-B aircraft matches the requested target flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TargetConfirmation {
+    #[default]
+    Pending,
+    AircraftVisible,
+    ConfirmedByCallsign,
+    InferredByAssignedHex,
+}
+
+impl TargetConfirmation {
+    pub(crate) fn is_target_confirmed(self) -> bool {
+        matches!(
+            self,
+            TargetConfirmation::ConfirmedByCallsign | TargetConfirmation::InferredByAssignedHex
+        )
+    }
+}
+
 impl std::fmt::Display for FlightPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -120,6 +147,12 @@ pub struct TrackedFlight {
     pub identifier: FlightIdentifier,
     pub callsign: Option<String>,
     pub hex: Option<String>,
+    #[serde(default)]
+    pub hex_source: Option<HexSource>,
+    #[serde(default)]
+    pub observed_callsign: Option<String>,
+    #[serde(default)]
+    pub target_confirmation: TargetConfirmation,
     pub phase: FlightPhase,
     pub route: Option<(String, String)>,
     pub aircraft_type: Option<String>,
@@ -185,7 +218,11 @@ pub fn build_flight_view(state: &FlightTrackerState, now: DateTime<Utc>) -> Vec<
                 .unwrap_or_else(|| format!("{}", f.identifier)),
             callsign: f.callsign.clone(),
             owner_login: f.tracked_by.clone(),
-            phase: format!("{}", f.phase),
+            phase: if f.target_confirmation == TargetConfirmation::AircraftVisible {
+                "AircraftVisible".to_string()
+            } else {
+                format!("{}", f.phase)
+            },
             altitude_ft: f.altitude_ft,
             ground_speed_kts: f.ground_speed_kts,
             last_seen_secs_ago: f
@@ -245,6 +282,9 @@ mod tests {
             identifier: FlightIdentifier::Callsign("DLH1234".to_string()),
             callsign: Some("DLH1234".to_string()),
             hex: None,
+            hex_source: None,
+            observed_callsign: None,
+            target_confirmation: TargetConfirmation::Pending,
             phase: FlightPhase::Landing,
             route: None,
             aircraft_type: None,
@@ -282,6 +322,10 @@ mod tests {
         let mut pending_callsign = tracked_flight();
         pending_callsign.hex = Some("48C2A2".to_string());
 
+        let mut aviationstack_pending = tracked_flight();
+        aviationstack_pending.hex = Some("4CA87D".to_string());
+        aviationstack_pending.hex_source = Some(HexSource::AviationStack);
+
         let mut live_callsign = tracked_flight();
         live_callsign.hex = Some("3C6589".to_string());
         live_callsign.last_seen = Some(dt("2026-04-18T11:00:00Z"));
@@ -291,13 +335,20 @@ mod tests {
         pending_hex_identifier.hex = Some("48C2A2".to_string());
 
         let mut state = FlightTrackerState {
-            flights: vec![pending_callsign, live_callsign, pending_hex_identifier],
+            flights: vec![
+                pending_callsign,
+                aviationstack_pending,
+                live_callsign,
+                pending_hex_identifier,
+            ],
         };
 
         assert_eq!(clear_pending_callsign_hexes(&mut state), 1);
         assert_eq!(state.flights[0].hex, None);
-        assert_eq!(state.flights[1].hex.as_deref(), Some("3C6589"));
-        assert_eq!(state.flights[2].hex.as_deref(), Some("48C2A2"));
+        assert_eq!(state.flights[0].hex_source, None);
+        assert_eq!(state.flights[1].hex.as_deref(), Some("4CA87D"));
+        assert_eq!(state.flights[2].hex.as_deref(), Some("3C6589"));
+        assert_eq!(state.flights[3].hex.as_deref(), Some("48C2A2"));
     }
 
     #[test]
@@ -385,6 +436,7 @@ mod tests {
     }
 
     // These constants mirror private consts in schedule.rs; keep in sync.
+    const PENDING_POLL_60_SEC: tokio::time::Duration = tokio::time::Duration::from_secs(60);
     const PENDING_POLL_2_MIN: tokio::time::Duration = tokio::time::Duration::from_secs(120);
     const PENDING_POLL_5_MIN: tokio::time::Duration = tokio::time::Duration::from_secs(300);
     const PENDING_POLL_10_MIN: tokio::time::Duration = tokio::time::Duration::from_secs(600);
@@ -434,7 +486,8 @@ mod tests {
             Some(dt("2026-04-18T09:45:00Z"))
         );
         assert_eq!(flight.takeoff_at, Some(dt("2026-04-18T10:05:00Z")));
-        assert_eq!(flight.hex.as_deref(), None);
+        assert_eq!(flight.hex.as_deref(), Some("3C6589"));
+        assert_eq!(flight.hex_source, Some(HexSource::AviationStack));
         assert_eq!(flight.aircraft_type.as_deref(), Some("A320"));
     }
 
@@ -450,28 +503,58 @@ mod tests {
     }
 
     #[test]
+    fn aviationstack_metadata_keeps_existing_resolved_callsign() {
+        let mut flight = tracked_flight();
+        flight.callsign = Some("EZY123".to_string());
+        let mut m = metadata();
+        m.flight_iata = Some("U2123".to_string());
+        m.flight_icao = Some("EJU123".to_string());
+
+        apply_aviationstack_metadata(&mut flight, m);
+
+        assert_eq!(flight.callsign.as_deref(), Some("EZY123"));
+    }
+
+    #[test]
+    fn aviationstack_metadata_can_upgrade_iata_callsign_to_icao() {
+        let mut flight = tracked_flight();
+        flight.callsign = Some("LH1929".to_string());
+        let mut m = metadata();
+        m.flight_iata = Some("LH1929".to_string());
+        m.flight_icao = Some("DLH1929".to_string());
+
+        apply_aviationstack_metadata(&mut flight, m);
+
+        assert_eq!(flight.callsign.as_deref(), Some("DLH1929"));
+    }
+
+    #[test]
     fn pending_poll_schedule_uses_sparse_interval_far_before_departure() {
         let mut flight = tracked_flight();
         flight.scheduled_departure_at = Some(dt("2026-04-18T12:00:00Z"));
 
         assert_eq!(
             pending_interval(&flight, dt("2026-04-18T05:59:00Z")),
-            PENDING_POLL_30_MIN
+            PENDING_POLL_15_MIN
         );
     }
 
     #[test]
-    fn pending_poll_schedule_uses_fast_interval_around_departure() {
+    fn pending_poll_schedule_uses_issue_259_pre_departure_ramp() {
         let mut flight = tracked_flight();
         flight.scheduled_departure_at = Some(dt("2026-04-18T12:00:00Z"));
 
         assert_eq!(
-            pending_interval(&flight, dt("2026-04-18T10:31:00Z")),
-            PENDING_POLL_2_MIN
+            pending_interval(&flight, dt("2026-04-18T09:01:00Z")),
+            PENDING_POLL_15_MIN
         );
         assert_eq!(
-            pending_interval(&flight, dt("2026-04-18T12:45:00Z")),
-            PENDING_POLL_2_MIN
+            pending_interval(&flight, dt("2026-04-18T11:01:00Z")),
+            PENDING_POLL_5_MIN
+        );
+        assert_eq!(
+            pending_interval(&flight, dt("2026-04-18T11:31:00Z")),
+            PENDING_POLL_60_SEC
         );
     }
 
@@ -496,6 +579,32 @@ mod tests {
         flight.scheduled_departure_at = Some(dt("2026-04-18T12:00:00Z"));
 
         assert_pending_expired(&flight, dt("2026-04-19T00:00:00Z"));
+    }
+
+    #[test]
+    fn next_poll_at_strict_chills_until_three_hours_before_departure() {
+        let mut flight = tracked_flight();
+        let now = dt("2026-04-18T10:00:00Z");
+        flight.scheduled_departure_at = Some(dt("2026-04-18T15:00:00Z"));
+        flight.last_adsb_poll_at = None;
+
+        assert_eq!(
+            next_poll_at(&[flight], now),
+            Some(dt("2026-04-18T12:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn next_poll_at_wakes_at_scheduled_cadence_boundaries() {
+        let mut flight = tracked_flight();
+        let now = dt("2026-04-18T10:59:00Z");
+        flight.scheduled_departure_at = Some(dt("2026-04-18T12:00:00Z"));
+        flight.last_adsb_poll_at = Some(dt("2026-04-18T10:50:00Z"));
+
+        assert_eq!(
+            next_poll_at(&[flight], now),
+            Some(dt("2026-04-18T11:00:00Z"))
+        );
     }
 
     #[test]
@@ -526,7 +635,7 @@ mod tests {
 
         assert_eq!(
             next_poll_at(&[flight], now),
-            Some(dt("2026-04-18T10:02:00Z"))
+            Some(dt("2026-04-18T10:01:00Z"))
         );
     }
 

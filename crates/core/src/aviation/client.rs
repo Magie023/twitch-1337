@@ -782,6 +782,18 @@ mod tests {
         assert_eq!(client.resolve_callsign("4CA87D").await, "4CA87D");
     }
 
+    #[test]
+    fn aviationstack_query_detects_iata_and_icao_flight_numbers() {
+        assert_eq!(
+            aviationstack_query(&FlightIdentifier::Callsign("LH1929".to_string()), None),
+            Some(("flight_iata", "LH1929".to_string()))
+        );
+        assert_eq!(
+            aviationstack_query(&FlightIdentifier::Callsign("DLH1929".to_string()), None),
+            Some(("flight_icao", "DLH1929".to_string()))
+        );
+    }
+
     // Under parallel fan-out both backends are queried; the 5xx one is
     // dropped from the merge and the healthy backend's aircraft is returned.
     #[tokio::test]

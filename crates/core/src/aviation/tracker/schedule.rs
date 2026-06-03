@@ -3,14 +3,16 @@ use tokio::time::Duration;
 
 use super::TrackedFlight;
 
+const PENDING_POLL_60_SEC: Duration = Duration::from_secs(60);
 const PENDING_POLL_2_MIN: Duration = Duration::from_secs(120);
 const PENDING_POLL_5_MIN: Duration = Duration::from_secs(300);
 const PENDING_POLL_10_MIN: Duration = Duration::from_secs(600);
 const PENDING_POLL_15_MIN: Duration = Duration::from_secs(900);
 const PENDING_POLL_30_MIN: Duration = Duration::from_secs(1800);
 
-const PENDING_SCHEDULED_FAR_BEFORE: i64 = 6 * 60 * 60;
-const PENDING_SCHEDULED_NEAR_BEFORE: i64 = 90 * 60;
+const PENDING_SCHEDULED_WAKE_BEFORE: i64 = 3 * 60 * 60;
+const PENDING_SCHEDULED_LOCK_IN_BEFORE: i64 = 60 * 60;
+const PENDING_SCHEDULED_HUNT_BEFORE: i64 = 30 * 60;
 const PENDING_SCHEDULED_NEAR_AFTER: i64 = 45 * 60;
 const PENDING_SCHEDULED_MID_AFTER: i64 = 3 * 60 * 60;
 const PENDING_SCHEDULED_EXPIRE_AFTER: i64 = 12 * 60 * 60;
@@ -24,6 +26,8 @@ use super::{FlightPhase, POLL_FAST, POLL_NORMAL, POLL_SLOW};
 pub(crate) enum PendingPollSchedule {
     Active {
         interval: Duration,
+        starts_at: DateTime<Utc>,
+        refresh_at: Option<DateTime<Utc>>,
         expires_at: DateTime<Utc>,
     },
     Expired,
@@ -87,6 +91,8 @@ fn pending_unknown_poll_schedule(
 
     PendingPollSchedule::Active {
         interval,
+        starts_at: flight.tracked_at,
+        refresh_at: None,
         expires_at,
     }
 }
@@ -106,20 +112,42 @@ pub(crate) fn pending_poll_schedule(
 
         let until_departure = scheduled_departure_at.signed_duration_since(now);
         let since_departure = now.signed_duration_since(scheduled_departure_at);
-        let interval = if until_departure > chrono_seconds(PENDING_SCHEDULED_FAR_BEFORE) {
-            PENDING_POLL_30_MIN
-        } else if until_departure > chrono_seconds(PENDING_SCHEDULED_NEAR_BEFORE) {
-            PENDING_POLL_15_MIN
-        } else if since_departure <= chrono_seconds(PENDING_SCHEDULED_NEAR_AFTER) {
-            PENDING_POLL_2_MIN
-        } else if since_departure <= chrono_seconds(PENDING_SCHEDULED_MID_AFTER) {
-            PENDING_POLL_5_MIN
-        } else {
-            PENDING_POLL_15_MIN
-        };
+        let wake_at = scheduled_departure_at - chrono_seconds(PENDING_SCHEDULED_WAKE_BEFORE);
+        let lock_in_at = scheduled_departure_at - chrono_seconds(PENDING_SCHEDULED_LOCK_IN_BEFORE);
+        let hunt_at = scheduled_departure_at - chrono_seconds(PENDING_SCHEDULED_HUNT_BEFORE);
+        let near_after_ends_at =
+            scheduled_departure_at + chrono_seconds(PENDING_SCHEDULED_NEAR_AFTER);
+        let mid_after_ends_at =
+            scheduled_departure_at + chrono_seconds(PENDING_SCHEDULED_MID_AFTER);
+        let (interval, starts_at, refresh_at) =
+            if until_departure > chrono_seconds(PENDING_SCHEDULED_WAKE_BEFORE) {
+                (PENDING_POLL_15_MIN, wake_at, Some(wake_at))
+            } else if until_departure > chrono_seconds(PENDING_SCHEDULED_LOCK_IN_BEFORE) {
+                (PENDING_POLL_15_MIN, wake_at, Some(lock_in_at))
+            } else if until_departure > chrono_seconds(PENDING_SCHEDULED_HUNT_BEFORE) {
+                (PENDING_POLL_5_MIN, lock_in_at, Some(hunt_at))
+            } else if now <= scheduled_departure_at {
+                (PENDING_POLL_60_SEC, hunt_at, Some(scheduled_departure_at))
+            } else if since_departure <= chrono_seconds(PENDING_SCHEDULED_NEAR_AFTER) {
+                (
+                    PENDING_POLL_2_MIN,
+                    scheduled_departure_at,
+                    Some(near_after_ends_at),
+                )
+            } else if since_departure <= chrono_seconds(PENDING_SCHEDULED_MID_AFTER) {
+                (
+                    PENDING_POLL_5_MIN,
+                    near_after_ends_at,
+                    Some(mid_after_ends_at),
+                )
+            } else {
+                (PENDING_POLL_15_MIN, mid_after_ends_at, None)
+            };
 
         return PendingPollSchedule::Active {
             interval,
+            starts_at,
+            refresh_at,
             expires_at,
         };
     }
@@ -143,9 +171,18 @@ pub(crate) fn poll_readiness(flight: &TrackedFlight, now: DateTime<Utc>) -> Poll
             PendingPollSchedule::Expired => return PollReadiness::Expired,
             PendingPollSchedule::Active {
                 interval,
+                starts_at,
+                refresh_at,
                 expires_at,
             } => {
                 let due_at = next_due_after_last_poll(flight.last_adsb_poll_at, interval, now);
+                let mut due_at = due_at.max(starts_at);
+                if let Some(refresh_at) = refresh_at
+                    && refresh_at > now
+                    && refresh_at < due_at
+                {
+                    due_at = refresh_at;
+                }
                 if due_at <= expires_at {
                     due_at
                 } else {

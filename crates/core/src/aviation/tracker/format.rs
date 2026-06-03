@@ -121,6 +121,19 @@ pub(crate) fn msg_pending_expired(flight: &TrackedFlight) -> String {
 
 pub(crate) fn msg_flight_status(flight: &TrackedFlight, now: DateTime<Utc>) -> String {
     let prefix = format_flight_prefix(flight);
+    if flight.target_confirmation == super::TargetConfirmation::AircraftVisible {
+        let observed = flight
+            .observed_callsign
+            .as_deref()
+            .map(|callsign| format!(" | ADS-B aktuell {callsign}"))
+            .unwrap_or_default();
+        let elapsed = now.signed_duration_since(flight.tracked_at);
+        return format!(
+            "{prefix} | Aircraft sichtbar, Zielflug noch nicht bestätigt{observed} | seit {} getrackt",
+            format_duration_hm(elapsed)
+        );
+    }
+
     let alt = format_alt(flight.altitude_ft);
     let speed = flight
         .ground_speed_kts
@@ -148,7 +161,12 @@ pub(crate) fn msg_flights_list(flights: &[TrackedFlight]) -> String {
         .map(|f| {
             let name = f.callsign.as_deref().unwrap_or(f.identifier.as_str());
             let alt = format_alt(f.altitude_ft);
-            format!("{name} ({} {alt})", f.phase)
+            let phase = if f.target_confirmation == super::TargetConfirmation::AircraftVisible {
+                "AircraftVisible".to_string()
+            } else {
+                format!("{}", f.phase)
+            };
+            format!("{name} ({phase} {alt})")
         })
         .collect();
     format!("Getrackte Fl\u{00fc}ge: {}", parts.join(" | "))
