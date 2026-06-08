@@ -24,6 +24,8 @@ The loader runs a simple `str::replace` pass before sending. Available tokens:
 | `{speaker_role}` | `regular`, `moderator`, `broadcaster` | `system.md`, `ai_instructions.md` |
 | `{channel}` | Channel name (without `#`) | all |
 | `{date}` | Today's Berlin-local date, `YYYY-MM-DD` | all |
+| `{model}` | Display name. OpenRouter: from provider catalog (normalized). Otherwise: same as `{model_id}`. | `system.md` |
+| `{model_id}` | Raw model id sent to the API (`ai.connection.model`). | `system.md` |
 
 Unknown tokens (e.g. typos like `{user_name}`) are left as literal text — no error, no warning. Check spelling.
 

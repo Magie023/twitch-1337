@@ -109,6 +109,8 @@ pub struct SubstitutionVars<'a> {
     pub speaker_role: &'a str,
     pub channel: &'a str,
     pub date: &'a str,
+    pub model: &'a str,
+    pub model_id: &'a str,
 }
 
 pub fn substitute(template: &str, v: SubstitutionVars<'_>) -> String {
@@ -119,6 +121,8 @@ pub fn substitute(template: &str, v: SubstitutionVars<'_>) -> String {
         .replace("{speaker_role}", v.speaker_role)
         .replace("{channel}", v.channel)
         .replace("{date}", v.date)
+        .replace("{model}", v.model)
+        .replace("{model_id}", v.model_id)
 }
 
 pub struct BuildOpts {
@@ -500,6 +504,8 @@ mod tests {
                 speaker_role: "regular",
                 channel: "ch",
                 date: "2026-04-30",
+                model: "Google Gemma 3 4B",
+                model_id: "google/gemma-3-4b-it",
             },
         );
         assert_eq!(s, "hi alice on ch 2026-04-30 regular {unknown}");
@@ -519,11 +525,31 @@ mod tests {
                 speaker_role: "regular",
                 channel: "euterheissgetraenk",
                 date: "2026-05-16",
+                model: "Google Gemma 3 4B",
+                model_id: "google/gemma-3-4b-it",
             },
         );
         assert!(out.contains(
             ">>> Antwort auf MagieDisplay (login=magie_023, id=141690010, role=regular):"
         ));
+    }
+
+    #[test]
+    fn substitute_replaces_model_tokens() {
+        let out = substitute(
+            "model={model} id={model_id}",
+            SubstitutionVars {
+                speaker_username: "a",
+                speaker_display: "A",
+                speaker_user_id: "1",
+                speaker_role: "regular",
+                channel: "ch",
+                date: "2026-05-16",
+                model: "Google Gemma 3 4B",
+                model_id: "google/gemma-3-4b-it",
+            },
+        );
+        assert_eq!(out, "model=Google Gemma 3 4B id=google/gemma-3-4b-it");
     }
 
     #[test]
@@ -540,6 +566,8 @@ mod tests {
                 speaker_role: "regular",
                 channel: "euterheissgetraenk",
                 date: "2026-05-16",
+                model: "Google Gemma 3 4B",
+                model_id: "google/gemma-3-4b-it",
             },
         );
         assert!(
@@ -556,6 +584,8 @@ mod tests {
             "{speaker_role}",
             "{channel}",
             "{date}",
+            "{model}",
+            "{model_id}",
         ] {
             assert!(
                 !out.contains(tok),
@@ -578,8 +608,11 @@ mod tests {
                 speaker_role: "regular",
                 channel: "euterheissgetraenk",
                 date: "2026-05-16",
+                model: "Google Gemma 3 4B",
+                model_id: "google/gemma-3-4b-it",
             },
         );
+        assert!(out.contains("model: `Google Gemma 3 4B`"));
         for tok in [
             "{speaker_username}",
             "{speaker_display}",
@@ -587,6 +620,8 @@ mod tests {
             "{speaker_role}",
             "{channel}",
             "{date}",
+            "{model}",
+            "{model_id}",
         ] {
             assert!(
                 !out.contains(tok),

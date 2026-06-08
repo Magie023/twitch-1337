@@ -276,6 +276,13 @@ where
             commands::news_cooldown_duration,
         ));
 
+        let model_catalog = Arc::new(ai::model_catalog::ModelCatalog::new(
+            reqwest::Client::builder()
+                .user_agent(crate::APP_USER_AGENT)
+                .build()
+                .expect("build model catalog HTTP client"),
+        ));
+
         cmd_list.push(Box::new(ai::command::AiCommand::new(
             ai::command::AiCommandDeps {
                 llm_client: llm.clone(),
@@ -286,6 +293,7 @@ where
                 emotes: emote_provider,
                 bot_username: bot_username.clone(),
                 doener: doener.clone(),
+                model_catalog,
             },
         )));
         cmd_list.push(Box::new(commands::news::NewsCommand::new(
