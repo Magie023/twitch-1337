@@ -74,8 +74,11 @@ current.
 3. `gh pr merge --squash`
 
 **Release flow (rolling):**
-1. Merge a PR into `main`. `docker.yml` triggers on push to main with
-   `paths-ignore` for docs/spec-only changes (no needless rebuilds).
+1. Merge a PR into `main`. `docker.yml` triggers on every push to `main`;
+   a `dorny/paths-filter` gate (`.github/path-filters.yml`) skips the build
+   when only docs, workflows, or other non-image paths changed. Use
+   **Actions → Docker → Run workflow** (`workflow_dispatch`) to force a
+   rebuild when needed (rollback verification, cache bust).
 2. CI builds the musl static binary and pushes the image to
    `ghcr.io/chronophylos/twitch-1337` with tags `latest` and
    `b<github.run_number>` (e.g. `b1234`).

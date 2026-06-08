@@ -49,6 +49,7 @@ Stack multiple when a change crosses subsystems.
 | `topic:concurrency` | Race conditions, locking, async correctness |
 | `topic:reliability` | Error handling, fallbacks, timeouts, retries |
 | `topic:perf` | Performance, latency, throughput |
+| `topic:no-deploy` | CI/workflow-only; merge does not rebuild or redeploy the bot |
 
 ### `deps:` — Dependabot buckets
 
@@ -59,6 +60,8 @@ Stack multiple when a change crosses subsystems.
 | `deps:docker` | Docker base image update |
 
 Applied automatically by Dependabot per `.github/dependabot.yml`.
+
+**Dependabot merge guidance:** `deps:actions` PRs (labeled `topic:no-deploy`) update CI workflows only — merge them in batches when convenient; path filters prevent a Docker rebuild or homelab redeploy. `deps:rust` and `deps:docker` PRs change the binary or base image and **do** trigger a rolling release on merge to `main`.
 
 ### `status:` — triage state
 

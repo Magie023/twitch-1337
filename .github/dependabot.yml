@@ -22,6 +22,7 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "deps:actions"
+      - "topic:no-deploy"
     groups:
       actions-minor-patch:
         update-types:
