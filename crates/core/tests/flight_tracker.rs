@@ -4,7 +4,7 @@ mod common;
 use std::time::Duration;
 
 use chrono::Duration as ChronoDuration;
-use common::TestBotBuilder;
+use common::{TestBot, TestBotBuilder};
 use secrecy::SecretString;
 use twitch_1337::aviation::tracker::{HexSource, TargetConfirmation};
 use twitch_1337::config::AviationstackBootstrap;
@@ -22,6 +22,33 @@ fn enable_aviationstack(config: &mut twitch_1337::config::Configuration) {
 
 fn set_aviationstack_enabled(o: &mut SettingsOverrides) {
     o.aviationstack.enabled = Some(true);
+}
+
+async fn read_debug_journal(bot: &TestBot) -> Vec<serde_json::Value> {
+    let dir = bot.data_dir.path().join("flight-tracker-debug");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+            let mut events = Vec::new();
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+                    let contents = tokio::fs::read_to_string(entry.path()).await.unwrap();
+                    events.extend(
+                        contents
+                            .lines()
+                            .map(|line| serde_json::from_str(line).unwrap()),
+                    );
+                }
+            }
+            if !events.is_empty() {
+                return events;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("debug journal was not written at {}", dir.display());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -177,6 +204,30 @@ async fn track_command_enriches_flight_from_aviationstack_once() {
     );
     assert!(flight.aviationstack_checked);
 
+    let events = read_debug_journal(&bot).await;
+    assert!(events.iter().any(|event| {
+        event["event"] == "aviationstack_metadata"
+            && event["http"]["provider"] == "aviationstack"
+            && event["http"]["outcome"] == "success"
+            && event["metadata"]["departure_iata"] == "FRA"
+            && event["metadata"]["arrival_iata"] == "MUC"
+            && event["metadata"]["aircraft_icao24"] == "3c6589"
+    }));
+    assert!(events.iter().any(|event| {
+        event["event"] == "track_started"
+            && event["identifier"] == "DLH1234"
+            && event["route"]["origin"] == "FRA"
+            && event["route"]["destination"] == "MUC"
+            && event["route"]["destination_coordinates_resolved"] == true
+    }));
+    let journal_text = events
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<String>();
+    assert!(!journal_text.contains("test-key"));
+    assert!(!journal_text.contains("access_key"));
+    assert!(!journal_text.contains("raw_body"));
+
     bot.shutdown().await;
 }
 
@@ -236,6 +287,22 @@ async fn track_command_by_hex_promotes_observed_callsign_and_route() {
         flight.target_confirmation,
         TargetConfirmation::InferredByAssignedHex
     );
+
+    let events = read_debug_journal(&bot).await;
+    assert!(events.iter().any(|event| {
+        event["event"] == "flight_route_lookup"
+            && event["callsign"] == "DLH1234"
+            && event["http"]["provider"] == "adsbdb"
+            && event["http"]["outcome"] == "success"
+            && event["origin_iata"] == "FRA"
+            && event["destination_iata"] == "MUC"
+            && event["destination_coordinates_resolved"] == true
+    }));
+    assert!(events.iter().any(|event| {
+        event["event"] == "track_started"
+            && event["hex"] == "3C6589"
+            && event["callsign"] == "DLH1234"
+    }));
 
     bot.shutdown().await;
 }
@@ -1276,6 +1343,11 @@ async fn pending_flight_expires_without_extra_adsb_call() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    let events = read_debug_journal(&bot).await;
+    assert!(events.iter().any(|event| {
+        event["event"] == "tracking_removal" && event["reason"] == "pending_expired"
+    }));
 
     bot.shutdown().await;
 }

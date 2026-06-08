@@ -209,6 +209,8 @@ Integration-testable via `TestBotBuilder` in `tests/common/`.
 
 `src/aviation/tracker.rs`: `MAX_TRACKED_FLIGHTS=12`, `MAX_FLIGHTS_PER_USER=3`, `TRACKING_LOST_THRESHOLD=300s`, `TRACKING_LOST_REMOVAL=1800s`, `POLL_FAST/NORMAL/SLOW=30/60/120s`.
 
+`src/aviation/tracker/debug_journal.rs`: `DEBUG_JOURNAL_KEEP_FILES=30` (daily JSONL files retained under `$DATA_DIR/flight-tracker-debug/`; older pruned on tracker startup + date-rollover).
+
 ## Binary / Docker
 
 Musl static build: `cargo build --release --target x86_64-unknown-linux-musl` (~6MB, works on Alpine/busybox, FROM scratch image). rustls not OpenSSL. Multi-stage Dockerfile with cargo-chef.

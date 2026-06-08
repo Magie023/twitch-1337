@@ -1,4 +1,5 @@
 pub(crate) mod commands;
+pub(crate) mod debug_journal;
 pub(crate) mod format;
 pub(crate) mod loop_run;
 pub(crate) mod metadata;
@@ -270,6 +271,10 @@ mod tests {
     use super::*;
     use crate::aviation::tracker::{
         commands::aircraft_matches_tracked_callsign,
+        debug_journal::{
+            DebugHttpOutcome, DiversionDebugInput, FlightTrackerDebugEvent, append_debug_event,
+            debug_journal_path,
+        },
         format::msg_landing,
         metadata::apply_aviationstack_metadata,
         phase::{CRUISE_STABLE_POLLS, detect_phase},
@@ -827,5 +832,103 @@ mod tests {
         let views = build_flight_view(&state, now);
 
         assert_eq!(views[0].identifier, "RYR42");
+    }
+
+    #[tokio::test]
+    async fn debug_journal_appends_to_date_named_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = dt("2026-04-18T10:00:00Z");
+
+        append_debug_event(
+            dir.path(),
+            now,
+            &FlightTrackerDebugEvent::track_started(&tracked_flight()),
+        )
+        .await;
+
+        let path = debug_journal_path(dir.path(), now);
+        assert_eq!(
+            path,
+            dir.path()
+                .join("flight-tracker-debug")
+                .join("2026-04-18.jsonl")
+        );
+        let contents = tokio::fs::read_to_string(path).await.unwrap();
+        let lines: Vec<_> = contents.lines().collect();
+        assert_eq!(lines.len(), 1);
+
+        let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(event["event"], "track_started");
+        assert_eq!(event["ts"], "2026-04-18T10:00:00Z");
+        assert_eq!(event["identifier"], "DLH1234");
+    }
+
+    #[test]
+    fn debug_journal_serialization_excludes_raw_bodies_and_secrets() {
+        let event = FlightTrackerDebugEvent::aviationstack_metadata(
+            &FlightIdentifier::Callsign("DLH1234".to_string()),
+            Some("DLH1234"),
+            DebugHttpOutcome::client_response("aviationstack", "flight_metadata", 403),
+            None,
+        );
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"status\":403"));
+        assert!(json.contains("client_response"));
+        assert!(!json.contains("access_key"));
+        assert!(!json.contains("test-key"));
+        assert!(!json.contains("raw_body"));
+
+        let forbidden =
+            serde_json::to_string(&DebugHttpOutcome::forbidden_parked("adsb.one", "hex", 403))
+                .unwrap();
+        assert!(forbidden.contains("forbidden_parked"));
+        assert!(forbidden.contains("\"status\":403"));
+
+        let rate_limited =
+            serde_json::to_string(&DebugHttpOutcome::rate_limited("adsb.lol", "hex")).unwrap();
+        assert!(rate_limited.contains("rate_limited"));
+        assert!(rate_limited.contains("\"status\":429"));
+    }
+
+    #[test]
+    fn debug_journal_diversion_decision_records_bearings_and_counter() {
+        let event = FlightTrackerDebugEvent::diversion_decision(
+            &TrackedFlight {
+                phase: FlightPhase::Approach,
+                target_confirmation: TargetConfirmation::ConfirmedByCallsign,
+                route: Some(("FRA".to_string(), "MUC".to_string())),
+                dest_lat: Some(48.3538),
+                dest_lon: Some(11.7861),
+                ..tracked_flight()
+            },
+            DiversionDebugInput {
+                previous_lat: 49.0,
+                previous_lon: 9.0,
+                current_lat: 49.2,
+                current_lon: 8.5,
+                destination_lat: 48.3538,
+                destination_lon: 11.7861,
+                ground_track: 280.0,
+                bearing_to_dest: 110.0,
+                diff: 170.0,
+                threshold: 90.0,
+                anomalous: true,
+                counter_before: 2,
+                counter_after: 3,
+                alert_emitted: true,
+            },
+        );
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["event"], "diversion_decision");
+        assert_eq!(json["phase"], "Approach");
+        assert_eq!(json["target_confirmation"], "ConfirmedByCallsign");
+        assert_eq!(json["ground_track"], 280.0);
+        assert_eq!(json["bearing_to_dest"], 110.0);
+        assert_eq!(json["counter_before"], 2);
+        assert_eq!(json["counter_after"], 3);
+        assert_eq!(json["alert_emitted"], true);
+        assert_eq!(json["route"]["destination"], "MUC");
     }
 }
