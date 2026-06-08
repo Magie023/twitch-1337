@@ -110,6 +110,33 @@ async fn flights_renders_snapshot_from_tracker() {
 }
 
 #[tokio::test]
+async fn flights_shows_busy_placeholder_when_snapshot_times_out() {
+    install_crypto();
+    let (mut state, _td_pings, _td_mem) = build_state_with_dirs(mod_helix()).await;
+    let (tx, _rx) = mpsc::channel::<TrackerCommand>(8);
+    state.tracker_tx = Some(Arc::new(tx));
+
+    let (sid, csrf, _bare) = insert_session(&state, "42", "admin");
+    let req = Request::builder()
+        .uri("/flights")
+        .method(Method::GET)
+        .header(header::COOKIE, cookie_header(&sid, &csrf))
+        .body(Body::empty())
+        .unwrap();
+    let res = app(state).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = body_string(res).await;
+    assert!(
+        html.contains("busy"),
+        "should distinguish timeout from empty list; got {html}"
+    );
+    assert!(
+        !html.contains("No flights tracked right now"),
+        "timeout must not masquerade as empty list; got {html}"
+    );
+}
+
+#[tokio::test]
 async fn flights_unauthenticated_redirects() {
     install_crypto();
     let (state, _td_pings, _td_mem) = build_state_with_dirs(mod_helix()).await;

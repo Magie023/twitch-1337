@@ -48,7 +48,12 @@ pub enum FlightIdentifier {
 impl FlightIdentifier {
     /// Parse user input into a FlightIdentifier.
     ///
-    /// 6-character all-hex-digit strings are treated as ICAO24 hex codes.
+    /// IATA flight numbers (`LL####`, 3–6 chars) take precedence over the
+    /// six-character ICAO24 hex rule when both apply (e.g. `AF1234`). Such
+    /// inputs are stored as callsigns; ADS-B may fall back to hex lookup when
+    /// a callsign poll misses and the string is also valid hex.
+    ///
+    /// Remaining 6-character all-hex-digit strings are ICAO24 hex codes.
     /// Everything else is treated as a callsign and must be ASCII alphanumeric
     /// with length 1..=8 (ICAO callsigns are at most 8 chars). Rejects path
     /// separators and other characters that would let user input forge URL
@@ -58,13 +63,20 @@ impl FlightIdentifier {
         if input.is_empty() {
             eyre::bail!("Identifier darf nicht leer sein");
         }
-        if input.len() == 6 && input.chars().all(|c| c.is_ascii_hexdigit()) {
+        if crate::aviation::is_iata_flight_number(&input) {
+            return Ok(FlightIdentifier::Callsign(input));
+        }
+        if Self::is_valid_icao24_hex(&input) {
             return Ok(FlightIdentifier::Hex(input));
         }
         if input.len() > 8 || !input.chars().all(|c| c.is_ascii_alphanumeric()) {
             eyre::bail!("Ungültiges callsign/hex");
         }
         Ok(FlightIdentifier::Callsign(input))
+    }
+
+    pub(crate) fn is_valid_icao24_hex(value: &str) -> bool {
+        value.len() == 6 && value.chars().all(|c| c.is_ascii_hexdigit())
     }
 
     /// Returns the display string (the callsign or hex value).
@@ -149,6 +161,8 @@ impl std::fmt::Display for FlightPhase {
 pub struct TrackedFlight {
     pub identifier: FlightIdentifier,
     pub callsign: Option<String>,
+    #[serde(default)]
+    pub alias_callsigns: Vec<String>,
     pub hex: Option<String>,
     #[serde(default)]
     pub hex_source: Option<HexSource>,
@@ -288,6 +302,7 @@ mod tests {
         TrackedFlight {
             identifier: FlightIdentifier::Callsign("DLH1234".to_string()),
             callsign: Some("DLH1234".to_string()),
+            alias_callsigns: vec!["DLH1234".to_string()],
             hex: None,
             hex_source: None,
             observed_callsign: None,
@@ -511,16 +526,42 @@ mod tests {
     }
 
     #[test]
-    fn aviationstack_metadata_keeps_existing_resolved_callsign() {
+    fn aviationstack_metadata_replaces_existing_resolved_callsign() {
         let mut flight = tracked_flight();
         flight.callsign = Some("EZY123".to_string());
+        flight.alias_callsigns = vec!["U2123".to_string(), "EZY123".to_string()];
         let mut m = metadata();
         m.flight_iata = Some("U2123".to_string());
         m.flight_icao = Some("EJU123".to_string());
 
         apply_aviationstack_metadata(&mut flight, m);
 
-        assert_eq!(flight.callsign.as_deref(), Some("EZY123"));
+        assert_eq!(flight.callsign.as_deref(), Some("EJU123"));
+        assert!(flight.alias_callsigns.iter().any(|alias| alias == "EZY123"));
+        assert!(flight.alias_callsigns.iter().any(|alias| alias == "EJU123"));
+    }
+
+    #[test]
+    fn aviationstack_metadata_preserves_static_callsign_as_alias() {
+        let mut flight = tracked_flight();
+        flight.identifier = FlightIdentifier::Callsign("AF1234".to_string());
+        flight.callsign = Some("AFR1234".to_string());
+        flight.alias_callsigns = vec!["AF1234".to_string(), "AFR1234".to_string()];
+        let mut m = metadata();
+        m.flight_iata = Some("AF1234".to_string());
+        m.flight_icao = Some("KLM1234".to_string());
+
+        apply_aviationstack_metadata(&mut flight, m);
+
+        assert_eq!(flight.callsign.as_deref(), Some("KLM1234"));
+        assert_eq!(
+            flight.alias_callsigns,
+            vec![
+                "AF1234".to_string(),
+                "AFR1234".to_string(),
+                "KLM1234".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -715,6 +756,59 @@ mod tests {
     fn parse_accepts_six_char_hex() {
         let id = FlightIdentifier::parse("4ca87d").unwrap();
         assert_eq!(id, FlightIdentifier::Hex("4CA87D".to_string()));
+    }
+
+    #[test]
+    fn parse_treats_six_char_iata_flight_numbers_as_callsigns() {
+        let id = FlightIdentifier::parse("AF1234").unwrap();
+        assert_eq!(id, FlightIdentifier::Callsign("AF1234".to_string()));
+
+        let id = FlightIdentifier::parse("BA1234").unwrap();
+        assert_eq!(id, FlightIdentifier::Callsign("BA1234".to_string()));
+    }
+
+    #[test]
+    fn parse_prefers_iata_over_valid_icao24_hex() {
+        let id = FlightIdentifier::parse("AB1234").unwrap();
+        assert_eq!(id, FlightIdentifier::Callsign("AB1234".to_string()));
+        assert!(FlightIdentifier::is_valid_icao24_hex("AB1234"));
+    }
+
+    #[test]
+    fn aircraft_matches_tracked_callsign_accepts_alias_callsigns() {
+        let mut flight = tracked_flight();
+        flight.identifier = FlightIdentifier::Callsign("AF1234".to_string());
+        flight.callsign = Some("KLM1234".to_string());
+        flight.alias_callsigns = vec![
+            "AF1234".to_string(),
+            "AFR1234".to_string(),
+            "KLM1234".to_string(),
+        ];
+        let operating_carrier = NearbyAircraft {
+            flight: Some(" AFR1234 ".to_string()),
+            ..aircraft_at(34_000, 0)
+        };
+
+        assert!(aircraft_matches_tracked_callsign(
+            &operating_carrier,
+            &flight
+        ));
+    }
+
+    #[test]
+    fn find_flight_index_matches_alias_callsigns() {
+        let mut flight = tracked_flight();
+        flight.identifier = FlightIdentifier::Callsign("AF1234".to_string());
+        flight.callsign = Some("KLM1234".to_string());
+        flight.alias_callsigns = vec!["AF1234".to_string(), "AFR1234".to_string()];
+        let state = FlightTrackerState {
+            flights: vec![flight],
+        };
+
+        assert_eq!(
+            crate::aviation::tracker::commands::find_flight_index(&state.flights, "afr1234"),
+            Some(0)
+        );
     }
 
     #[test]

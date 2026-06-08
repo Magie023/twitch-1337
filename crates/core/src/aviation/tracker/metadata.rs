@@ -27,6 +27,29 @@ pub(crate) fn normalize_flight_code(value: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn add_alias_callsign(flight: &mut TrackedFlight, value: &str) {
+    let Some(alias) = normalize_flight_code(value) else {
+        return;
+    };
+    if !flight
+        .alias_callsigns
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(&alias))
+    {
+        flight.alias_callsigns.push(alias);
+    }
+}
+
+pub(crate) fn seed_flight_aliases(flight: &mut TrackedFlight) {
+    if let FlightIdentifier::Callsign(callsign) = &flight.identifier {
+        let callsign = callsign.clone();
+        add_alias_callsign(flight, &callsign);
+    }
+    if let Some(callsign) = flight.callsign.clone() {
+        add_alias_callsign(flight, &callsign);
+    }
+}
+
 pub(crate) fn normalize_icao24(value: &str) -> Option<String> {
     let value = value.trim();
     if value.len() == 6 && value.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -107,16 +130,15 @@ pub(crate) fn apply_aviationstack_metadata(
             .clone_from(&metadata.departure_scheduled);
     }
 
+    if let Some(iata) = metadata.flight_iata.as_deref() {
+        add_alias_callsign(flight, iata);
+    }
+    if let Some(icao) = metadata.flight_icao.as_deref() {
+        add_alias_callsign(flight, icao);
+    }
     if let Some(callsign) = metadata_callsign(&metadata) {
-        let should_apply = flight.callsign.is_none()
-            || flight
-                .callsign
-                .as_deref()
-                .zip(metadata.flight_iata.as_deref())
-                .is_some_and(|(current, iata)| current.eq_ignore_ascii_case(iata));
-        if should_apply {
-            flight.callsign = Some(callsign);
-        }
+        add_alias_callsign(flight, &callsign);
+        flight.callsign = Some(callsign);
     }
 
     if let (Some(origin), Some(dest)) = (

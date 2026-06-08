@@ -4,11 +4,18 @@ mod common;
 use std::time::Duration;
 
 use chrono::Duration as ChronoDuration;
-use common::{TestBot, TestBotBuilder};
+use common::{TestBot, TestBotBuilder, fake_clock::FakeClock, fake_transport};
 use secrecy::SecretString;
-use twitch_1337::aviation::tracker::{HexSource, TargetConfirmation};
+use twitch_1337::aviation::AviationClient;
+use twitch_1337::aviation::tracker::{
+    FlightIdentifier, FlightPhase, FlightTrackerState, HexSource, TargetConfirmation,
+    TrackedFlight, TrackerCommand, run_flight_tracker,
+};
 use twitch_1337::config::AviationstackBootstrap;
 use twitch_1337::settings::overrides::SettingsOverrides;
+use twitch_1337::twitch::ChatSender;
+use twitch_irc::ClientConfig;
+use twitch_irc::login::StaticLoginCredentials;
 use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
@@ -450,6 +457,157 @@ async fn aviationstack_mismatched_adsb_callsign_observes_aircraft_without_confir
     assert_eq!(flight.observed_callsign.as_deref(), Some("DLH9999"));
     assert_eq!(flight.callsign.as_deref(), Some("DLH1929"));
     assert_eq!(flight.hex_source, Some(HexSource::AviationStack));
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
+async fn aviationstack_codeshare_confirms_operating_callsign_alias() {
+    let bot = TestBotBuilder::new()
+        .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
+        .spawn()
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/flights"))
+        .and(query_param("access_key", "test-key"))
+        .and(query_param("flight_iata", "AF1234"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "flight": { "iata": "AF1234", "icao": "KLM1234", "number": "1234" },
+                "airline": { "iata": "KL", "icao": "KLM", "name": "KLM" },
+                "departure": {
+                    "iata": "CDG",
+                    "icao": "LFPG",
+                    "scheduled": "2026-04-18T10:30:00+00:00",
+                    "actual": null,
+                    "actual_runway": null
+                },
+                "arrival": {
+                    "iata": "AMS",
+                    "icao": "EHAM",
+                    "estimated": "2026-04-18T11:45:00+00:00",
+                    "actual": null
+                },
+                "aircraft": { "icao24": "3c1234", "icao": "A320" }
+            }]
+        })))
+        .mount(&bot.adsb_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/hex/3C1234"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ac": [{
+                "hex": "3C1234",
+                "flight": "AFR1234",
+                "alt_baro": 12000,
+                "gs": 280.0,
+                "baro_rate": 1200,
+                "lat": 49.0,
+                "lon": 3.0,
+                "squawk": "1000"
+            }],
+            "ctime": 0,
+            "now": 0,
+            "total": 1
+        })))
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let mut bot = bot;
+    bot.send("alice", "!track AF1234").await;
+    let ack = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(ack.contains("KLM1234"), "got: {ack}");
+
+    let state_path = bot.data_dir.path().join("flights.ron");
+    let persisted = tokio::fs::read_to_string(state_path).await.unwrap();
+    let state: twitch_1337::aviation::tracker::FlightTrackerState =
+        ron::from_str(&persisted).unwrap();
+    let flight = state.flights.first().expect("persisted flight");
+    assert_eq!(flight.callsign.as_deref(), Some("KLM1234"));
+    assert_eq!(
+        flight.target_confirmation,
+        TargetConfirmation::ConfirmedByCallsign
+    );
+    assert_eq!(flight.observed_callsign.as_deref(), Some("AFR1234"));
+    assert!(flight.alias_callsigns.iter().any(|alias| alias == "AF1234"));
+    assert!(
+        flight
+            .alias_callsigns
+            .iter()
+            .any(|alias| alias == "AFR1234")
+    );
+    assert!(
+        flight
+            .alias_callsigns
+            .iter()
+            .any(|alias| alias == "KLM1234")
+    );
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
+async fn duplicate_tracking_rejects_existing_operating_alias() {
+    let bot = TestBotBuilder::new()
+        .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
+        .spawn()
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/flights"))
+        .and(query_param("access_key", "test-key"))
+        .and(query_param("flight_iata", "AF1234"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "flight": { "iata": "AF1234", "icao": "KLM1234", "number": "1234" },
+                "airline": { "iata": "KL", "icao": "KLM", "name": "KLM" },
+                "departure": {
+                    "iata": "CDG",
+                    "icao": "LFPG",
+                    "scheduled": "2026-04-18T10:30:00+00:00",
+                    "actual": null,
+                    "actual_runway": null
+                },
+                "arrival": {
+                    "iata": "AMS",
+                    "icao": "EHAM",
+                    "estimated": "2026-04-18T11:45:00+00:00",
+                    "actual": null
+                },
+                "aircraft": { "icao24": null, "icao": "A320" }
+            }]
+        })))
+        .mount(&bot.adsb_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/callsign/KLM1234"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ac": [],
+            "ctime": 0,
+            "now": 0,
+            "total": 0
+        })))
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let mut bot = bot;
+    bot.send("alice", "!track AF1234").await;
+    let ack = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(ack.contains("KLM1234"), "got: {ack}");
+
+    bot.send("bob", "!track AFR1234").await;
+    let duplicate = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(
+        duplicate.contains("wird schon getrackt"),
+        "got: {duplicate}"
+    );
 
     bot.shutdown().await;
 }
@@ -1350,4 +1508,139 @@ async fn pending_flight_expires_without_extra_adsb_call() {
     }));
 
     bot.shutdown().await;
+}
+
+#[tokio::test]
+async fn tracker_answers_dashboard_commands_while_polling() {
+    twitch_1337::install_crypto_provider();
+    let now = chrono::DateTime::parse_from_rfc3339("2026-04-18T11:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let state = FlightTrackerState {
+        flights: vec![TrackedFlight {
+            identifier: FlightIdentifier::Callsign("DLH1234".to_string()),
+            callsign: Some("DLH1234".to_string()),
+            alias_callsigns: vec!["DLH1234".to_string()],
+            hex: None,
+            hex_source: None,
+            observed_callsign: None,
+            target_confirmation: TargetConfirmation::ConfirmedByCallsign,
+            phase: FlightPhase::Cruise,
+            route: None,
+            aircraft_type: None,
+            altitude_ft: Some(35_000),
+            vertical_rate_fpm: None,
+            ground_speed_kts: Some(450.0),
+            lat: None,
+            lon: None,
+            squawk: None,
+            tracked_by: "alice".to_string(),
+            tracked_at: now,
+            last_seen: Some(now),
+            last_visible_at: Some(now),
+            last_phase_change: None,
+            polls_since_change: 0,
+            takeoff_at: None,
+            aviationstack_checked: false,
+            scheduled_departure_at: None,
+            last_adsb_poll_at: None,
+            divert_consecutive_polls: 0,
+            dest_lat: None,
+            dest_lon: None,
+        }],
+    };
+    tokio::fs::write(
+        data_dir.path().join("flights.ron"),
+        ron::ser::to_string(&state).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let adsb_mock = wiremock::MockServer::start().await;
+    let nominatim_mock = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/callsign/DLH1234"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(1_500))
+                .set_body_json(serde_json::json!({
+                    "ac": [{
+                        "hex": "3C6589",
+                        "flight": "DLH1234",
+                        "alt_baro": 35000,
+                        "gs": 450.0,
+                        "baro_rate": 0,
+                        "lat": 50.0,
+                        "lon": 8.5,
+                        "squawk": "1000"
+                    }],
+                    "ctime": 0,
+                    "now": 0,
+                    "total": 1
+                })),
+        )
+        .mount(&adsb_mock)
+        .await;
+
+    let _transport = fake_transport::install().await;
+    let client_cfg = ClientConfig::new_simple(StaticLoginCredentials::new(
+        "bot".to_owned(),
+        Some("test-token".to_owned()),
+    ));
+    let (_incoming, client) = twitch_irc::TwitchIRCClient::<
+        fake_transport::FakeTransport,
+        StaticLoginCredentials,
+    >::new(client_cfg);
+    let client = std::sync::Arc::new(client);
+    client.join("test_channel".to_string()).expect("join");
+    let sender = ChatSender::new(client);
+    let aviation = AviationClient::new_with_base_url(
+        adsb_mock.uri(),
+        adsb_mock.uri(),
+        nominatim_mock.uri(),
+        reqwest::Client::new(),
+    );
+    let clock = FakeClock::new(now);
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let tracker_task = tokio::spawn(run_flight_tracker(
+        rx,
+        sender,
+        "test_channel".to_string(),
+        aviation,
+        data_dir.path().to_path_buf(),
+        clock,
+    ));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (snapshot_tx, snapshot_rx) = tokio::sync::oneshot::channel();
+    tx.send(TrackerCommand::Snapshot { reply: snapshot_tx })
+        .await
+        .unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_millis(500), snapshot_rx)
+        .await
+        .expect("snapshot should not wait for ADS-B poll")
+        .unwrap();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].identifier, "DLH1234");
+
+    let (delete_tx, delete_rx) = tokio::sync::oneshot::channel();
+    tx.send(TrackerCommand::DeleteFromWeb {
+        identifier: "DLH1234".to_string(),
+        reply: delete_tx,
+    })
+    .await
+    .unwrap();
+    let removed = tokio::time::timeout(Duration::from_millis(500), delete_rx)
+        .await
+        .expect("delete should not wait for ADS-B poll")
+        .unwrap();
+    assert_eq!(removed.as_deref(), Some("DLH1234"));
+
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(3), tracker_task)
+        .await
+        .expect("tracker should shut down")
+        .unwrap();
 }

@@ -20,6 +20,7 @@ pub(crate) fn tracked_flight() -> TrackedFlight {
     TrackedFlight {
         identifier: FlightIdentifier::Callsign("DLH1929".to_string()),
         callsign: Some("DLH1929".to_string()),
+        alias_callsigns: vec!["DLH1929".to_string()],
         hex: Some("3C6497".to_string()),
         hex_source: Some(HexSource::Adsb),
         observed_callsign: Some("DLH9999".to_string()),

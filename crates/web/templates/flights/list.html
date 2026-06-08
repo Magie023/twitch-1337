@@ -22,6 +22,8 @@
   </div>
   {% if aviation_disabled %}
     <div class="empty">Aviation tracking is disabled.</div>
+  {% else if tracker_busy %}
+    <div class="empty">Flight tracker busy — refresh to retry.</div>
   {% else if flights.is_empty() %}
     <div class="empty">No flights tracked right now.</div>
   {% else %}

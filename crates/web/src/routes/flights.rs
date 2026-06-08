@@ -25,6 +25,7 @@ use crate::state::WebState;
 struct ListTpl {
     flights: Vec<TrackedFlightView>,
     aviation_disabled: bool,
+    tracker_busy: bool,
     user_login: String,
     user_avatar_url: Option<String>,
     csrf: String,
@@ -45,21 +46,30 @@ pub fn mod_router() -> Router<WebState> {
 
 const TRACKER_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Round-trips one tracker command and returns the reply, or `None` when
+enum TrackerResult<R> {
+    Ok(R),
+    Timeout,
+    Unavailable,
+}
+
+/// Round-trips one tracker command and returns the reply, or a status when
 /// aviation is disabled, the channel is closed, or the reply times out.
 async fn tracker_request<R>(
     state: &WebState,
     build_cmd: impl FnOnce(oneshot::Sender<R>) -> TrackerCommand,
-) -> Option<R> {
-    let tx = state.tracker_tx.as_ref()?;
+) -> TrackerResult<R> {
+    let Some(tx) = state.tracker_tx.as_ref() else {
+        return TrackerResult::Unavailable;
+    };
     let (reply_tx, reply_rx) = oneshot::channel();
     if tx.send(build_cmd(reply_tx)).await.is_err() {
-        return None;
+        return TrackerResult::Unavailable;
     }
-    tokio::time::timeout(TRACKER_TIMEOUT, reply_rx)
-        .await
-        .ok()
-        .and_then(Result::ok)
+    match tokio::time::timeout(TRACKER_TIMEOUT, reply_rx).await {
+        Ok(Ok(value)) => TrackerResult::Ok(value),
+        Ok(Err(_)) => TrackerResult::Unavailable,
+        Err(_) => TrackerResult::Timeout,
+    }
 }
 
 async fn list(
@@ -68,15 +78,19 @@ async fn list(
     cookies: Cookies,
 ) -> Result<Response, WebError> {
     let aviation_disabled = state.tracker_tx.is_none();
-    let flights = tracker_request(&state, |reply| TrackerCommand::Snapshot { reply })
-        .await
-        .unwrap_or_default();
+    let (flights, tracker_busy) =
+        match tracker_request(&state, |reply| TrackerCommand::Snapshot { reply }).await {
+            TrackerResult::Ok(flights) => (flights, false),
+            TrackerResult::Timeout => (Vec::new(), true),
+            TrackerResult::Unavailable => (Vec::new(), false),
+        };
     let csrf = csrf::encode(&session.csrf_value);
     let is_mod = session.is_mod();
     let is_owner = matches!(session.role, crate::auth::Role::Owner);
     render(&ListTpl {
         flights,
         aviation_disabled,
+        tracker_busy,
         user_avatar_url: session.avatar_url.clone(),
         user_login: session.user_login,
         csrf,
@@ -111,23 +125,30 @@ async fn delete(
             msg: "required".into(),
         });
     }
-    let removed = tracker_request(&state, |reply| TrackerCommand::DeleteFromWeb {
+    let delete_result = tracker_request(&state, |reply| TrackerCommand::DeleteFromWeb {
         identifier: identifier.clone(),
         reply,
     })
-    .await
-    .flatten();
+    .await;
     tracing::info!(
         target: "twitch_1337_web",
         user_id = %session.user_id,
         action = "flight_delete",
         target_id = %identifier,
-        result = if removed.is_some() { "ok" } else { "not_found" },
+        result = match &delete_result {
+            TrackerResult::Ok(Some(_)) => "ok",
+            TrackerResult::Ok(None) => "not_found",
+            TrackerResult::Timeout => "timeout",
+            TrackerResult::Unavailable => "unavailable",
+        },
     );
-    let msg = match removed {
-        Some(label) => format!("Untracked `{label}`."),
-        None if state.tracker_tx.is_none() => "Aviation tracking disabled.".to_owned(),
-        None => format!("`{identifier}` not found."),
+    let msg = match delete_result {
+        TrackerResult::Ok(Some(label)) => format!("Untracked `{label}`."),
+        TrackerResult::Ok(None) => format!("`{identifier}` not found."),
+        TrackerResult::Timeout => {
+            "Flight tracker busy — refresh to check whether the delete applied.".to_owned()
+        }
+        TrackerResult::Unavailable => "Aviation tracking disabled.".to_owned(),
     };
     flash::set(&cookies, &msg);
     Ok(Redirect::to("/flights").into_response())

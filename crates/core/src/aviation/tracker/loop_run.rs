@@ -11,7 +11,7 @@ use crate::util::clock::Clock;
 
 use super::{
     TrackerCommand,
-    commands::{poll_all_flights, process_command},
+    commands::{poll_all_flights_with_commands, process_command},
     debug_journal::{DEBUG_JOURNAL_KEEP_FILES, prune_debug_journals},
     schedule::next_poll_at,
     state::load_tracker_state,
@@ -62,15 +62,27 @@ pub async fn run_flight_tracker<T, L>(
                 .await;
             }
 
-            poll_all_flights(
+            let deferred_commands = poll_all_flights_with_commands(
                 &mut state,
                 &sender,
                 &channel,
                 &aviation_client,
                 &data_dir,
                 &*clock,
+                Some(&mut cmd_rx),
             )
             .await;
+            for cmd in deferred_commands {
+                process_command(
+                    cmd,
+                    &mut state,
+                    &sender,
+                    &aviation_client,
+                    &data_dir,
+                    &*clock,
+                )
+                .await;
+            }
 
             let now = clock.now_utc();
             // Roll the journal forward: once the date changes, drop stale files.

@@ -22,3 +22,7 @@ pub use tracker::{FlightIdentifier, TrackerCommand, run_flight_tracker};
 pub use types::{Airport, AltBaro, AviationstackFlightMetadata, FlightRoute, NearbyAircraft};
 
 pub(crate) use location::iata_to_coords;
+
+pub(crate) fn is_iata_flight_number(s: &str) -> bool {
+    location::is_iata_flight_number(s)
+}
