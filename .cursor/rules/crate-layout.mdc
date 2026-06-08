@@ -1,0 +1,22 @@
+---
+description: Workspace crate boundaries and where code belongs
+alwaysApply: true
+---
+
+# Crate layout
+
+| Crate | Role |
+|---|---|
+| `crates/core` | Bot logic: IRC handlers, aviation, AI memory, pings, schedules, config/settings types |
+| `crates/llm` | LLM backends, agent loop, tool calling |
+| `crates/web` | Axum dashboard, routes, templates, auth |
+| `crates/twitch-1337` | Binary entrypoint, wires `Services`, spawns handlers |
+
+## Where to put things
+
+- New IRC handler → `crates/core/src/twitch/handlers/`, spawn from `crates/twitch-1337/src/lib.rs::run_bot`
+- New chat command → handler + `commands.rs` registration pattern
+- New dashboard route/page → `crates/web/src/`
+- LLM provider/tool changes → `crates/llm/`
+
+Shared deps flow through `Services` in the binary crate — don't reach across crate boundaries with ad-hoc globals.

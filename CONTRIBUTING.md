@@ -6,7 +6,7 @@ Thanks for contributing to twitch-1337. This file covers repo conventions that a
 
 1. Branch from `main`, commit, push.
 2. `gh pr create` — fill in summary + test plan.
-3. Wait for the 7 required status checks to go green (see CLAUDE.md § CI & branch policy).
+3. Wait for the required status checks to go green (see CLAUDE.md § CI & branch policy).
 4. Rebase on `main` if the `strict` check blocks merge.
 5. `gh pr merge --squash` once reviews are in.
 
@@ -78,6 +78,20 @@ refactor: split main.rs into handler modules
 ```
 
 Subject ≤ 50 chars. Body explains the *why* when it isn't obvious from the diff.
+
+### AI agents (Cursor, Claude Code, etc.)
+
+Agents should follow [`.cursor/rules/git-commits.mdc`](.cursor/rules/git-commits.mdc): keep the conventional `type(scope):` prefix, but write the **subject** in unhinged gen-z slang. The **body** stays normal, professional prose — stupid subject, serious explanation. Example:
+
+```
+fix(chat): bestie the websocket literally ate shit and died 💀
+
+The handler assumed every inbound message included a user ID. Anonymous
+viewer messages omitted the field and caused a panic. Guard the optional
+field and skip processing when absent.
+```
+
+Human contributors can use plain subjects; the gen-z bit is for agents only.
 
 ## Before committing
 

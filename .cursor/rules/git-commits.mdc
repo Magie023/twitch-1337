@@ -1,0 +1,52 @@
+---
+description: Conventional commits with stupid subject / professional body; commit autonomously
+alwaysApply: true
+---
+
+# Git commits
+
+Commit on your own after completing individual tasks, fixes, or review items — do not wait for the user to ask.
+
+## When to commit
+
+- One commit per logical task or fix (not one giant commit at the end)
+- After finishing a review fix, commit that fix before moving to the next
+- Include formatting-only changes (e.g. `cargo fmt`) in the same commit as the related code change
+
+## Format
+
+Use [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): subject`
+
+Common types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `ci`, `perf`
+
+## The juxtaposition
+
+Every commit is a **stupid subject, serious body** bit:
+
+- **Subject**: unhinged gen-z slang — brainrot, meme-y, lowercase chaos. The dumber the better.
+- **Body**: crisp, professional engineering prose. What changed, why, trade-offs. Complete sentences. Could go in a PR description or postmortem.
+
+The contrast is the point. Subject sounds like a group chat; body sounds like a staff engineer wrote it.
+
+```bash
+git commit -m "$(cat <<'EOF'
+fix(chat): bestie the websocket literally ate shit and died 💀
+
+The handler assumed every inbound message included a user ID. Anonymous
+viewer messages omitted the field and caused a panic in the parser.
+Guard the optional field and skip processing when absent.
+
+EOF
+)"
+```
+
+More subject examples (body always stays normal):
+
+- `feat(overlay): we cooked so hard the badge renderer is giving sigma grindset`
+- `fix(auth): token refresh was lowkey feral and not in a good way`
+- `refactor(db): yeeted duplicate query into one function no thoughts head empty`
+- `chore(deps): bumped tokio bc living in 2023 is not the vibe`
+
+## Safety
+
+Follow the git safety protocol: never push to `main`, no `--no-verify`, no committing secrets, no amend unless explicitly allowed.

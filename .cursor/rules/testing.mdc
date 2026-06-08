@@ -1,0 +1,31 @@
+---
+description: How this repo tests IRC handlers, HTTP, and the dashboard
+alwaysApply: true
+---
+
+# Testing
+
+## IRC / bot integration
+
+- Use `TestBotBuilder` in `crates/core/tests/common/test_bot.rs`
+- Handlers are generic over `Transport` + `LoginCredentials` for fake transports
+- Integration tests live in `crates/core/tests/` and `crates/twitch-1337/tests/`
+
+## HTTP / aviation
+
+- Use `wiremock` for external API boundaries
+- Flight tracker tests in `crates/core/tests/flight_tracker.rs`
+
+## Web routes
+
+- Route tests in `crates/web/tests/` with helpers in `tests/helpers/mod.rs`
+- `dev-login` feature for auth bypass in tests
+
+## E2e
+
+- `cargo nextest run -p twitch-1337-web --features e2e` (or `just e2e`)
+- Requires chromedriver + version-matched Chrome
+
+## CI
+
+CI runs `cargo nextest run --workspace` plus a separate e2e job. Match that locally when validating web changes.

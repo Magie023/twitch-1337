@@ -1,0 +1,17 @@
+---
+description: Files and paths that must never be committed
+alwaysApply: true
+---
+
+# Never commit
+
+Already in `.gitignore` — do not force-add:
+
+- `.env`, `.env.local`
+- `config.toml` (local copy with secrets — use `config.toml.example` as template)
+- `token.ron`, `*.ron` runtime data (`pings.ron`, `leaderboard.ron`, etc.)
+- `./dev-data/`, `./prod-data/`, `/data/`
+- `.worktrees/`
+- `token.ron`, schedule/leaderboard/ping/memory caches at repo root
+
+Before committing, verify `git status` has no secret-bearing or runtime data files staged.
