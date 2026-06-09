@@ -39,7 +39,7 @@ Linear history required, force-push + delete blocked, conversations must resolve
 |---|---|---|
 | `fmt` | ci.yml | cargo fmt --check |
 | `clippy` | ci.yml | cargo clippy --workspace --all-targets -- -D warnings |
-| `test` | ci.yml | cargo nextest run --workspace |
+| `test` | ci.yml | cargo llvm-cov nextest --workspace (lcov artifact; no threshold gate) |
 | `cargo audit` | ci.yml | RustSec CVE scan of Cargo.lock via rustsec/audit-check |
 | `hadolint (Dockerfile)` | sast.yml | Dockerfile lint, SARIF → Security tab |
 | `trivy config (IaC)` | sast.yml | IaC misconfig scan, HIGH/CRITICAL only |

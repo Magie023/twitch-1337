@@ -28,4 +28,4 @@ alwaysApply: true
 
 ## CI
 
-CI runs `cargo nextest run --workspace` plus a separate e2e job. Match that locally when validating web changes.
+CI `test` job runs `cargo llvm-cov nextest --workspace` (tests + lcov); e2e is a separate non-blocking job. Locally use `cargo nextest run --workspace` unless you need coverage.
