@@ -28,6 +28,10 @@ RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path r
 # 3. Builder stage - builds the application
 FROM base AS builder
 
+# Runtime UID for the scratch image (matches distroless nonroot convention).
+RUN groupadd --system --gid 65532 app \
+  && useradd --system --uid 65532 --gid app --no-create-home --shell /usr/sbin/nologin app
+
 # Build-arg: short commit SHA of the source tree. Required because
 # .dockerignore strips .git/, so the web crate's build.rs cannot derive
 # it itself. Defaults to "unknown" if the caller does not pass one.
@@ -62,6 +66,8 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 
 # Copy the static binary
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/twitch-1337 /twitch-1337
+
+USER 65532:65532
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD ["/twitch-1337", "--healthcheck"]

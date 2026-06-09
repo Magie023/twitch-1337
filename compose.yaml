@@ -3,9 +3,11 @@ services:
     restart: always
     image: ghcr.io/chronophylos/twitch-1337:latest
     pull_policy: always
+    user: "65532:65532"
     environment:
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
+      # Host dir must be writable by UID 65532: mkdir -p ./data && sudo chown -R 65532:65532 ./data
       - ./data:/data
     networks:
       - default
