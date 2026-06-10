@@ -382,7 +382,7 @@ impl PingManager {
         store.pings.retain(|name, ping| match validate_template(&ping.template) {
             Ok(()) => true,
             Err(e) => {
-                tracing::warn!(ping = %name, error = %e, "Dropping ping with invalid template on load");
+                tracing::warn!(ping = %name, error = ?e, "Dropping ping with invalid template on load");
                 false
             }
         });
