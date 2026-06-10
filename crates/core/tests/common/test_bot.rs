@@ -361,8 +361,19 @@ impl TestBotBuilder {
             shutdown_rx,
         ));
 
-        // Allow handshake to complete and handlers to subscribe before tests send.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for startup instead of sleeping a fixed interval: the latency
+        // handler flips `irc_connected` as its first action, and it is spawned
+        // *after* `spawn_handlers` created the command handler's broadcast
+        // receiver — so once the flag is set, injected messages can no longer
+        // be lost to a not-yet-subscribed handler.
+        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !irc_connected.load(std::sync::atomic::Ordering::Relaxed) {
+            assert!(
+                tokio::time::Instant::now() < ready_deadline,
+                "bot did not become ready within 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
 
         TestBot {
             transport,
