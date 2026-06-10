@@ -30,7 +30,9 @@ jobs:
   build:
     name: build and push
     needs: changes
-    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.code == 'true')
+    # Ref gate: workflow_dispatch on a non-main branch must not publish
+    # :latest (the dockhand webhook would deploy it past all required checks).
+    if: always() && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.code == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
