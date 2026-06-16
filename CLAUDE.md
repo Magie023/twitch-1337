@@ -59,8 +59,9 @@ dependabot_security_updates — all enabled. Push-protection blocks commits
 containing known provider tokens at the server.
 
 **Dependabot** (`.github/dependabot.yml`): weekly PRs for `cargo`, `github-actions`,
-`docker`. Cargo minor+patch grouped as `rust-minor-patch`. Docker ecosystem bumps
-both tag AND sha256 digest in Dockerfile.
+`docker`. Cargo minor+patch grouped as `rust-minor-patch`; GitHub Actions minor+patch
+grouped as `actions-minor-patch`. Docker ecosystem bumps both tag AND sha256 digest in
+Dockerfile.
 
 **Action pinning:** security-critical actions pinned to **commit SHA** with version
 comment: `rustsec/audit-check`, `gitleaks/gitleaks-action`, `zizmorcore/zizmor-action`,
