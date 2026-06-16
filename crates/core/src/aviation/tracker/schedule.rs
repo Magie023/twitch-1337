@@ -1,7 +1,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use tokio::time::Duration;
 
-use super::TrackedFlight;
+use super::{TargetConfirmation, TrackedFlight};
 
 const PENDING_POLL_60_SEC: Duration = Duration::from_secs(60);
 const PENDING_POLL_2_MIN: Duration = Duration::from_secs(120);
@@ -53,7 +53,9 @@ fn add_duration(time: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
 }
 
 pub(crate) fn is_pending_adsb(flight: &TrackedFlight) -> bool {
-    flight.last_seen.is_none()
+    flight.target_confirmation == TargetConfirmation::Pending
+        || (flight.target_confirmation == TargetConfirmation::AircraftVisible
+            && flight.last_visible_at.is_none())
 }
 
 pub(crate) fn live_poll_interval(flight: &TrackedFlight) -> Duration {
@@ -209,4 +211,38 @@ pub(crate) fn next_poll_at(flights: &[TrackedFlight], now: DateTime<Utc>) -> Opt
             PollReadiness::NotDue(next_at) => next_at,
         })
         .min()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aviation::tracker::test_support::{dt, tracked_flight};
+
+    #[test]
+    fn aircraft_visible_without_target_confirmation_uses_live_polling_after_pending_expiry() {
+        let mut flight = tracked_flight();
+        flight.target_confirmation = TargetConfirmation::AircraftVisible;
+        flight.last_seen = None;
+        flight.last_visible_at = Some(dt("2026-04-18T23:58:00Z"));
+        flight.last_adsb_poll_at = Some(dt("2026-04-18T23:58:00Z"));
+
+        assert_eq!(
+            poll_readiness(&flight, dt("2026-04-19T00:01:00Z")),
+            PollReadiness::Due
+        );
+    }
+
+    #[test]
+    fn aircraft_visible_without_visibility_anchor_can_still_expire_as_pending() {
+        let mut flight = tracked_flight();
+        flight.target_confirmation = TargetConfirmation::AircraftVisible;
+        flight.last_seen = None;
+        flight.last_visible_at = None;
+        flight.last_adsb_poll_at = Some(dt("2026-04-18T23:58:00Z"));
+
+        assert_eq!(
+            poll_readiness(&flight, dt("2026-04-19T00:01:00Z")),
+            PollReadiness::Expired
+        );
+    }
 }

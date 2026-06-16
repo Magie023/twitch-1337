@@ -607,6 +607,7 @@ async fn handle_track<T, L>(
         tracked_by: requested_by.to_string(),
         tracked_at: now,
         last_seen: None,
+        last_visible_at: None,
         last_phase_change: None,
         polls_since_change: 0,
         takeoff_at: None,
@@ -747,6 +748,7 @@ async fn handle_track<T, L>(
                     flight.squawk = ac.squawk.clone();
                     if target_confirmed {
                         flight.last_seen = Some(now);
+                        flight.last_visible_at = Some(now);
                         flight.phase = detect_phase(&flight, &ac);
                     }
                 }
@@ -1049,10 +1051,15 @@ pub(crate) async fn poll_all_flights<T, L>(
         let ac = match ac_result {
             Ok(Ok(Some(ac))) => ac,
             Ok(Ok(None)) => {
-                if flight.last_seen.is_none() {
+                // Removal keys off `last_visible_at` (last poll the assigned
+                // aircraft was on ADS-B), NOT `last_seen` (last target-confirmed
+                // sighting). A flight stuck in AircraftVisible freezes
+                // `last_seen` while its hex keeps showing up, so using it here
+                // would collapse the grace window on the first empty poll.
+                if flight.last_visible_at.is_none() {
                     flight.polls_since_change = flight.polls_since_change.saturating_add(1);
-                } else if let Some(last_seen) = flight.last_seen {
-                    let lost_duration = now.signed_duration_since(last_seen);
+                } else if let Some(last_visible_at) = flight.last_visible_at {
+                    let lost_duration = now.signed_duration_since(last_visible_at);
                     if lost_duration >= removal_threshold {
                         info!(
                             identifier = %flight.identifier,
@@ -1091,6 +1098,11 @@ pub(crate) async fn poll_all_flights<T, L>(
             continue;
         };
 
+        // The assigned aircraft is visible on ADS-B (any confirmation kind).
+        // This anchors the tracking-lost removal timer, separate from `last_seen`,
+        // which only moves on direct target confirmation below.
+        flight.last_visible_at = Some(now);
+
         let direct_target_confirmed = raw_confirmation.is_target_confirmed();
         let sticky_confirmation =
             should_keep_prior_confirmation(flight, raw_confirmation, used_hex, now);
@@ -1102,26 +1114,6 @@ pub(crate) async fn poll_all_flights<T, L>(
         let phase_sample_confirmed =
             direct_target_confirmed || (sticky_confirmation && aircraft_callsign(&ac).is_none());
         let became_target_confirmed = !was_target_confirmed && direct_target_confirmed;
-
-        if !direct_target_confirmed && let Some(last_seen) = flight.last_seen {
-            let lost_duration = now.signed_duration_since(last_seen);
-            if lost_duration >= removal_threshold {
-                info!(
-                    identifier = %flight.identifier,
-                    "Removing flight: tracking lost for {}s",
-                    lost_duration.num_seconds()
-                );
-                messages.push(msg_tracking_lost(flight));
-                removals.push(idx);
-                continue;
-            } else if lost_duration >= lost_threshold {
-                debug!(
-                    identifier = %flight.identifier,
-                    last_seen_secs_ago = lost_duration.num_seconds(),
-                    "Flight not confirmed via ADS-B"
-                );
-            }
-        }
 
         if direct_target_confirmed {
             flight.last_seen = Some(now);

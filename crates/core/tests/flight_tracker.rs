@@ -601,6 +601,160 @@ async fn confirmed_aviationstack_hex_with_later_mismatched_callsign_suppresses_t
     bot.shutdown().await;
 }
 
+/// A flight whose assigned hex stays visible (with a mismatched callsign, so it
+/// sits in `AircraftVisible`) freezes `last_seen` because that anchor only moves
+/// on direct target confirmation. A separate `last_visible_at` anchor must keep
+/// the tracking-lost removal timer alive: a single transient empty ADS-B poll
+/// must NOT instantly remove the flight, but a sustained absence past
+/// `TRACKING_LOST_REMOVAL` still removes it and announces the loss.
+#[tokio::test]
+async fn visible_assigned_hex_then_one_empty_poll_keeps_flight_within_grace_window() {
+    let bot = TestBotBuilder::new()
+        .at("2026-04-18T14:00:00Z".parse().unwrap())
+        .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
+        .spawn()
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/flights"))
+        .and(query_param("access_key", "test-key"))
+        .and(query_param("flight_icao", "DLH1929"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "flight": { "iata": "LH1929", "icao": "DLH1929", "number": "1929" },
+                "airline": { "iata": "LH", "icao": "DLH", "name": "Lufthansa" },
+                "departure": {
+                    "iata": "BER",
+                    "icao": "EDDB",
+                    "scheduled": "2026-04-18T12:00:00+00:00",
+                    "actual": null,
+                    "actual_runway": null
+                },
+                "arrival": {
+                    "iata": "MUC",
+                    "icao": "EDDM",
+                    "estimated": "2026-04-18T13:10:00+00:00",
+                    "actual": null
+                },
+                "aircraft": { "icao24": "3c6497", "icao": "A320" }
+            }]
+        })))
+        .mount(&bot.adsb_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/hex/3C6497"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ac": [{
+                "hex": "3C6497",
+                "flight": "DLH1929",
+                "alt_baro": 35000,
+                "gs": 450.0,
+                "baro_rate": 0,
+                "lat": 52.3,
+                "lon": 13.4,
+                "squawk": "1000"
+            }],
+            "ctime": 0,
+            "now": 0,
+            "total": 1
+        })))
+        .up_to_n_times(1)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/hex/3C6497"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ac": [{
+                "hex": "3C6497",
+                "flight": "DLH9999",
+                "alt_baro": 12000,
+                "gs": 280.0,
+                "baro_rate": -1800,
+                "lat": 52.4,
+                "lon": 13.5,
+                "squawk": "1000"
+            }],
+            "ctime": 0,
+            "now": 0,
+            "total": 1
+        })))
+        .up_to_n_times(5)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/hex/3C6497"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ac": [],
+            "ctime": 0,
+            "now": 0,
+            "total": 0
+        })))
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let mut bot = bot;
+    bot.send("alice", "!track DLH1929").await;
+    let ack = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(ack.contains("DLH1929"), "got: {ack}");
+
+    let state_path = bot.data_dir.path().join("flights.ron");
+
+    for _ in 0..5 {
+        bot.clock.advance(ChronoDuration::minutes(7));
+        bot.expect_silent(Duration::from_millis(200)).await;
+    }
+
+    let persisted = tokio::fs::read_to_string(&state_path).await.unwrap();
+    let state: twitch_1337::aviation::tracker::FlightTrackerState =
+        ron::from_str(&persisted).unwrap();
+    let flight = state
+        .flights
+        .first()
+        .expect("visible assigned hex should remain tracked");
+    assert_eq!(
+        flight.target_confirmation,
+        TargetConfirmation::AircraftVisible
+    );
+
+    bot.clock.advance(ChronoDuration::minutes(7));
+    bot.expect_silent(Duration::from_millis(300)).await;
+
+    let persisted = tokio::fs::read_to_string(&state_path).await.unwrap();
+    let state: twitch_1337::aviation::tracker::FlightTrackerState =
+        ron::from_str(&persisted).unwrap();
+    let flight = state
+        .flights
+        .first()
+        .expect("one transient empty poll must not remove the flight");
+    assert_eq!(
+        flight.target_confirmation,
+        TargetConfirmation::AircraftVisible
+    );
+
+    bot.clock.advance(ChronoDuration::minutes(31));
+    let lost = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(
+        lost.contains("Signal verloren"),
+        "expected tracking-lost message, got: {lost}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let persisted = tokio::fs::read_to_string(&state_path).await.unwrap();
+    let state: twitch_1337::aviation::tracker::FlightTrackerState =
+        ron::from_str(&persisted).unwrap();
+    assert!(
+        state.flights.is_empty(),
+        "flight should be removed after sustained ADS-B absence"
+    );
+
+    bot.shutdown().await;
+}
+
 #[tokio::test]
 async fn aviationstack_hex_without_adsb_callsign_is_inferred_in_departure_window() {
     let bot = TestBotBuilder::new()

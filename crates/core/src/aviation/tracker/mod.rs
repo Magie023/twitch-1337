@@ -5,6 +5,8 @@ pub(crate) mod metadata;
 pub(crate) mod phase;
 pub(crate) mod schedule;
 pub(crate) mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -169,6 +171,11 @@ pub struct TrackedFlight {
     pub tracked_by: String,
     pub tracked_at: DateTime<Utc>,
     pub last_seen: Option<DateTime<Utc>>,
+    /// Last poll in which the assigned aircraft was visible on ADS-B; drives the
+    /// tracking-lost removal timer. Distinct from `last_seen`, which is the last
+    /// *target-confirmed* sighting and drives confirmation decay.
+    #[serde(default)]
+    pub last_visible_at: Option<DateTime<Utc>>,
     pub last_phase_change: Option<DateTime<Utc>>,
     pub polls_since_change: u32,
     #[serde(default)]
@@ -329,6 +336,7 @@ mod tests {
             tracked_by: "alice".to_string(),
             tracked_at: dt("2026-04-18T10:00:00Z"),
             last_seen: None,
+            last_visible_at: None,
             last_phase_change: None,
             polls_since_change: 0,
             takeoff_at: None,
@@ -658,6 +666,7 @@ mod tests {
     fn next_poll_at_keeps_live_fast_interval_for_recent_changes() {
         let mut flight = tracked_flight_with(FlightPhase::Unknown, 0);
         let now = dt("2026-04-18T10:00:00Z");
+        flight.target_confirmation = TargetConfirmation::ConfirmedByCallsign;
         flight.last_seen = Some(now);
         flight.last_adsb_poll_at = Some(now);
 
