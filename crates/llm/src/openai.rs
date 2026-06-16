@@ -186,7 +186,7 @@ fn parse_tool_call_arguments(
     match serde_json::from_str::<serde_json::Value>(raw) {
         Ok(v) => (v, None),
         Err(e) => {
-            warn!(tool, id, error = ?e, raw, "invalid tool-call JSON arguments");
+            warn!(tool, id, error = %e, raw, "invalid tool-call JSON arguments");
             let err = ToolArgsError::Provider {
                 error: e.to_string(),
                 raw: truncate_for_echo(raw, 512),

@@ -1,6 +1,8 @@
 use chrono::DateTime;
 use chrono::Utc;
 
+use crate::aviation::AviationstackFlightMetadata;
+
 use super::TrackedFlight;
 
 fn format_duration_hm(d: chrono::TimeDelta) -> String {
@@ -26,6 +28,131 @@ fn format_route(route: &Option<(String, String)>) -> String {
         Some((orig, dest)) => format!(" {orig}\u{2192}{dest}"),
         None => String::new(),
     }
+}
+
+fn present(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn format_time(value: Option<DateTime<Utc>>) -> Option<String> {
+    value.map(|dt| dt.format("%H:%M").to_string())
+}
+
+fn first_present<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<&'a str> {
+    values
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+}
+
+fn format_airport(
+    iata: Option<&str>,
+    icao: Option<&str>,
+    airport: Option<&str>,
+    terminal: Option<&str>,
+    gate: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    parts.push(
+        first_present([iata, icao, airport])
+            .map(str::trim)
+            .unwrap_or("?")
+            .to_string(),
+    );
+    if let Some(terminal) = present(terminal) {
+        parts.push(format!("T{terminal}"));
+    }
+    if let Some(gate) = present(gate) {
+        parts.push(format!("Gate {gate}"));
+    }
+    parts.join(" ")
+}
+
+fn delay_part(label: &str, delay: Option<i64>) -> Option<String> {
+    let delay = delay?;
+    if delay > 0 {
+        Some(format!("{label} delay: {delay}m"))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn msg_aviationstack_info(metadata: &AviationstackFlightMetadata) -> String {
+    let flight = first_present([
+        metadata.flight_iata.as_deref(),
+        metadata.flight_icao.as_deref(),
+        metadata.flight_number.as_deref(),
+    ])
+    .unwrap_or("Flight");
+    let airline = present(metadata.airline_name.as_deref())
+        .map(|name| format!(" {name}"))
+        .unwrap_or_default();
+    let dep = format_airport(
+        metadata.departure_iata.as_deref(),
+        metadata.departure_icao.as_deref(),
+        metadata.departure_airport.as_deref(),
+        metadata.departure_terminal.as_deref(),
+        metadata.departure_gate.as_deref(),
+    );
+    let arr = format_airport(
+        metadata.arrival_iata.as_deref(),
+        metadata.arrival_icao.as_deref(),
+        metadata.arrival_airport.as_deref(),
+        metadata.arrival_terminal.as_deref(),
+        metadata.arrival_gate.as_deref(),
+    );
+
+    let mut parts = vec![format!("{flight}{airline}"), format!("{dep} -> {arr}")];
+
+    if let Some(dep_time) = format_time(
+        metadata
+            .departure_actual_runway
+            .as_ref()
+            .cloned()
+            .or_else(|| metadata.departure_actual.as_ref().cloned())
+            .or_else(|| metadata.departure_estimated.as_ref().cloned())
+            .or_else(|| metadata.departure_scheduled.as_ref().cloned()),
+    ) {
+        parts.push(format!("Dep: {dep_time}"));
+    }
+    if let Some(arr_time) = format_time(
+        metadata
+            .arrival_actual
+            .as_ref()
+            .cloned()
+            .or_else(|| metadata.arrival_estimated.as_ref().cloned())
+            .or_else(|| metadata.arrival_scheduled.as_ref().cloned()),
+    ) {
+        parts.push(format!("Arr: {arr_time}"));
+    }
+    if let Some(baggage) = present(metadata.arrival_baggage.as_deref()) {
+        parts.push(format!("Baggage: {baggage}"));
+    }
+    if let Some(part) = delay_part("Dep", metadata.departure_delay_minutes) {
+        parts.push(part);
+    }
+    if let Some(part) = delay_part("Arr", metadata.arrival_delay_minutes) {
+        parts.push(part);
+    }
+    if let Some(status) = present(metadata.flight_status.as_deref()) {
+        parts.push(format!("Status: {status}"));
+    }
+
+    let mut aircraft = Vec::new();
+    if let Some(aircraft_type) = present(metadata.aircraft_icao.as_deref()) {
+        aircraft.push(aircraft_type.to_string());
+    }
+    if let Some(registration) = present(metadata.aircraft_registration.as_deref()) {
+        aircraft.push(registration.to_string());
+    }
+    if !aircraft.is_empty() {
+        parts.push(format!("Aircraft: {}", aircraft.join(" ")));
+    }
+    if let Some(icao24) = present(metadata.aircraft_icao24.as_deref()) {
+        parts.push(format!("ICAO24: {}", icao24.to_uppercase()));
+    }
+
+    parts.join(" | ")
 }
 
 fn format_flight_prefix(flight: &TrackedFlight) -> String {

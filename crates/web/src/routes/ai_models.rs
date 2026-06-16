@@ -10,7 +10,6 @@ use reqwest::Client;
 use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
-use twitch_1337_core::ai::model_catalog::ModelCatalog;
 use twitch_1337_core::settings::ai::AiBackendKind;
 
 use crate::state::WebState;
@@ -93,27 +92,23 @@ pub async fn get_ai_models(
         .as_ref()
         .map(|b| b.api_key.expose_secret().to_owned());
 
-    let result = if ModelCatalog::is_openrouter(conn) {
-        fetch_openrouter(&state.model_catalog).await
-    } else {
-        match conn.backend {
-            AiBackendKind::OpenAi => {
-                fetch_openai(
-                    &state.http,
-                    conn.base_url
-                        .as_deref()
-                        .unwrap_or("https://api.openai.com/v1"),
-                    api_key.as_deref().unwrap_or(""),
-                )
-                .await
-            }
-            AiBackendKind::Ollama => {
-                fetch_ollama(
-                    &state.http,
-                    conn.base_url.as_deref().unwrap_or("http://localhost:11434"),
-                )
-                .await
-            }
+    let result = match conn.backend {
+        AiBackendKind::OpenAi => {
+            fetch_openai(
+                &state.http,
+                conn.base_url
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com/v1"),
+                api_key.as_deref().unwrap_or(""),
+            )
+            .await
+        }
+        AiBackendKind::Ollama => {
+            fetch_ollama(
+                &state.http,
+                conn.base_url.as_deref().unwrap_or("http://localhost:11434"),
+            )
+            .await
         }
     };
 
@@ -133,14 +128,6 @@ pub async fn get_ai_models(
             })
         }
     }
-}
-
-async fn fetch_openrouter(catalog: &ModelCatalog) -> eyre::Result<Vec<ModelEntry>> {
-    let entries = catalog.openrouter_model_entries().await?;
-    Ok(entries
-        .into_iter()
-        .map(|(id, label)| ModelEntry { id, label })
-        .collect())
 }
 
 async fn fetch_openai(http: &Client, base: &str, api_key: &str) -> eyre::Result<Vec<ModelEntry>> {

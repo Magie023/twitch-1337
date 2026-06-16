@@ -54,7 +54,3 @@ Memory updates as tool calls first (when needed), then return the reply as a pla
 
 - username: `{speaker_username}`
 - role: `{speaker_role}`
-
-## Runtime
-
-- model: `{model}`

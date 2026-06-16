@@ -1,30 +1,23 @@
 //! Tracing / observability initialisation.
 
-use chrono::{DateTime, Utc};
-use chrono_tz::Europe::Berlin;
+use chrono::Utc;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
-/// `HH:MM:SS.mmm` in Europe/Berlin. The default `SystemTime` formatter emits
-/// the full RFC3339 timestamp on every line (~30 chars including date + tz +
+/// `HH:MM:SS.mmm` (UTC). The default `SystemTime` formatter emits the full
+/// RFC3339 timestamp on every line (~30 chars including date + tz +
 /// microseconds), which is overkill for a single-process bot whose logs
 /// always belong to today. The short form preserves millisecond precision —
 /// enough to order events within a handler — while leaving room for the
-/// actual message content. Berlin local time keeps log timestamps on the
-/// same clock as the bot's domain logic (1337 tracker, schedules, dreamer),
-/// so the 13:37 event logs as 13:37.
+/// actual message content.
 struct ShortTimer;
-
-fn short_time(t: DateTime<Utc>) -> String {
-    t.with_timezone(&Berlin).format("%H:%M:%S%.3f").to_string()
-}
 
 impl FormatTime for ShortTimer {
     fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
-        write!(w, "{}", short_time(Utc::now()))
+        write!(w, "{}", Utc::now().format("%H:%M:%S%.3f"))
     }
 }
 
@@ -46,26 +39,4 @@ pub fn install_tracing() {
         .with(fmt_layer)
         .with(ErrorLayer::default())
         .init();
-}
-
-#[cfg(test)]
-mod tests {
-    use chrono::{Duration, TimeZone, Utc};
-
-    use super::short_time;
-
-    #[test]
-    fn short_time_formats_in_berlin_summer_time() {
-        // 11:37 UTC in June is 13:37 CEST (UTC+2) — the 1337 event must
-        // read as 13:37 in the logs.
-        let t = Utc.with_ymd_and_hms(2026, 6, 10, 11, 37, 0).unwrap() + Duration::milliseconds(123);
-        assert_eq!(short_time(t), "13:37:00.123");
-    }
-
-    #[test]
-    fn short_time_formats_in_berlin_winter_time() {
-        // 12:37 UTC in January is 13:37 CET (UTC+1).
-        let t = Utc.with_ymd_and_hms(2026, 1, 15, 12, 37, 0).unwrap();
-        assert_eq!(short_time(t), "13:37:00.000");
-    }
 }

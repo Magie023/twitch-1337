@@ -6,7 +6,7 @@ Thanks for contributing to twitch-1337. This file covers repo conventions that a
 
 1. Branch from `main`, commit, push.
 2. `gh pr create` — fill in summary + test plan.
-3. Wait for the required status checks to go green (see CLAUDE.md § CI & branch policy).
+3. Wait for the 7 required status checks to go green (see CLAUDE.md § CI & branch policy).
 4. Rebase on `main` if the `strict` check blocks merge.
 5. `gh pr merge --squash` once reviews are in.
 
@@ -49,7 +49,6 @@ Stack multiple when a change crosses subsystems.
 | `topic:concurrency` | Race conditions, locking, async correctness |
 | `topic:reliability` | Error handling, fallbacks, timeouts, retries |
 | `topic:perf` | Performance, latency, throughput |
-| `topic:no-deploy` | CI/workflow-only; merge does not rebuild or redeploy the bot |
 
 ### `deps:` — Dependabot buckets
 
@@ -60,8 +59,6 @@ Stack multiple when a change crosses subsystems.
 | `deps:docker` | Docker base image update |
 
 Applied automatically by Dependabot per `.github/dependabot.yml`.
-
-**Dependabot merge guidance:** `deps:actions` PRs (labeled `topic:no-deploy`) update CI workflows only — merge them in batches when convenient; path filters prevent a Docker rebuild or homelab redeploy. `deps:rust` and `deps:docker` PRs change the binary or base image and **do** trigger a rolling release on merge to `main`.
 
 ### `status:` — triage state
 
@@ -81,20 +78,6 @@ refactor: split main.rs into handler modules
 ```
 
 Subject ≤ 50 chars. Body explains the *why* when it isn't obvious from the diff.
-
-### AI agents (Cursor, Claude Code, etc.)
-
-Agents should follow [`.cursor/rules/git-commits.mdc`](.cursor/rules/git-commits.mdc): keep the conventional `type(scope):` prefix, but write the **subject** in unhinged gen-z slang. The **body** stays normal, professional prose — stupid subject, serious explanation. Example:
-
-```
-fix(chat): bestie the websocket literally ate shit and died 💀
-
-The handler assumed every inbound message included a user ID. Anonymous
-viewer messages omitted the field and caused a panic. Guard the optional
-field and skip processing when absent.
-```
-
-Human contributors can use plain subjects; the gen-z bit is for agents only.
 
 ## Before committing
 

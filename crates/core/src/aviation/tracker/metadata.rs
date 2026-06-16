@@ -1,8 +1,6 @@
-use tracing::{debug, warn};
+use crate::aviation::{AviationstackFlightMetadata, iata_to_coords};
 
-use crate::aviation::{AviationClient, AviationstackFlightMetadata, iata_to_coords};
-
-use super::{FlightIdentifier, HexSource, TrackedFlight};
+use super::{HexSource, TrackedFlight};
 
 pub(crate) fn set_route_from_iata(flight: &mut TrackedFlight, origin: &str, dest: &str) {
     let origin = origin.trim().to_uppercase();
@@ -24,29 +22,6 @@ pub(crate) fn normalize_flight_code(value: &str) -> Option<String> {
         None
     } else {
         Some(value.to_uppercase())
-    }
-}
-
-pub(crate) fn add_alias_callsign(flight: &mut TrackedFlight, value: &str) {
-    let Some(alias) = normalize_flight_code(value) else {
-        return;
-    };
-    if !flight
-        .alias_callsigns
-        .iter()
-        .any(|existing| existing.eq_ignore_ascii_case(&alias))
-    {
-        flight.alias_callsigns.push(alias);
-    }
-}
-
-pub(crate) fn seed_flight_aliases(flight: &mut TrackedFlight) {
-    if let FlightIdentifier::Callsign(callsign) = &flight.identifier {
-        let callsign = callsign.clone();
-        add_alias_callsign(flight, &callsign);
-    }
-    if let Some(callsign) = flight.callsign.clone() {
-        add_alias_callsign(flight, &callsign);
     }
 }
 
@@ -130,15 +105,16 @@ pub(crate) fn apply_aviationstack_metadata(
             .clone_from(&metadata.departure_scheduled);
     }
 
-    if let Some(iata) = metadata.flight_iata.as_deref() {
-        add_alias_callsign(flight, iata);
-    }
-    if let Some(icao) = metadata.flight_icao.as_deref() {
-        add_alias_callsign(flight, icao);
-    }
     if let Some(callsign) = metadata_callsign(&metadata) {
-        add_alias_callsign(flight, &callsign);
-        flight.callsign = Some(callsign);
+        let should_apply = flight.callsign.is_none()
+            || flight
+                .callsign
+                .as_deref()
+                .zip(metadata.flight_iata.as_deref())
+                .is_some_and(|(current, iata)| current.eq_ignore_ascii_case(iata));
+        if should_apply {
+            flight.callsign = Some(callsign);
+        }
     }
 
     if let (Some(origin), Some(dest)) = (
@@ -160,26 +136,5 @@ pub(crate) fn apply_aviationstack_metadata(
 
     if let Some(takeoff_at) = takeoff_at {
         flight.takeoff_at = Some(takeoff_at);
-    }
-}
-
-pub(crate) async fn fetch_aviationstack_metadata_for_tracking(
-    aviation_client: &AviationClient,
-    identifier: &FlightIdentifier,
-    callsign: Option<&str>,
-) -> Option<AviationstackFlightMetadata> {
-    match aviation_client
-        .get_aviationstack_flight_metadata(identifier, callsign)
-        .await
-    {
-        Ok(Some(metadata)) => Some(metadata),
-        Ok(None) => {
-            debug!(identifier = %identifier, "No aviationstack metadata found for flight");
-            None
-        }
-        Err(e) => {
-            warn!(error = ?e, identifier = %identifier, "Aviationstack metadata lookup failed");
-            None
-        }
     }
 }

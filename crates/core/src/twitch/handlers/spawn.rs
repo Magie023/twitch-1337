@@ -188,13 +188,6 @@ where
 
     let (broadcast_tx, _) = broadcast::channel::<ServerMessage>(100);
 
-    // Subscribe the command handler before any task (router included) is
-    // spawned: broadcast receivers only see messages sent after subscription,
-    // so a receiver created inside the spawned task races the router and can
-    // silently drop early messages. The latency handler and 1337 tracker
-    // subscribe late on purpose (fresh receiver per PING / per 13:36 session).
-    let commands_broadcast_rx = broadcast_tx.subscribe();
-
     let router = tokio::spawn(run_message_router(incoming, broadcast_tx.clone()));
 
     // Notify lets the scheduled-message handler drain in-flight sends before exiting.
@@ -263,6 +256,7 @@ where
     });
 
     let generic_commands = tokio::spawn({
+        let btx = broadcast_tx.clone();
         let client = client.clone();
         async move {
             let (admin_channel, ai_channel) = {
@@ -270,7 +264,7 @@ where
                 (s.twitch.admin_channel.clone(), s.twitch.ai_channel.clone())
             };
             run_generic_command_handler(CommandHandlerConfig {
-                broadcast_rx: commands_broadcast_rx,
+                broadcast_tx: btx,
                 client,
                 ai_config: config.ai.clone(),
                 llm,

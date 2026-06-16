@@ -169,8 +169,6 @@ pub async fn run_ritual(
             speaker_role: "dreamer",
             channel,
             date: &now_str,
-            model: "",
-            model_id: "",
         },
     );
     // The dreamer wants every memory file in one shot, so glue durable +

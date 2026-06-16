@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use eyre::{Result, WrapErr as _};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::util::APP_USER_AGENT;
 
@@ -48,8 +48,6 @@ const FRESH_WINDOW: f64 = 5.0;
 const ADSB_COOLDOWN: Duration = Duration::from_secs(60);
 /// Consecutive non-timeout retryable errors that trigger a cooldown park.
 const ERROR_STREAK_PARK: u8 = 3;
-/// Minimum spacing for aggregate ADS-B outage error logs.
-const ADSB_AGGREGATE_OUTAGE_LOG_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Per-backend health, index-aligned with `AviationClient::adsb_aggregators`.
 struct BackendHealth {
@@ -158,14 +156,6 @@ pub(super) enum AdsbEndpoint<'a> {
 }
 
 impl AdsbEndpoint<'_> {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Point { .. } => "point",
-            Self::Hex(_) => "hex",
-            Self::Callsign(_) => "callsign",
-        }
-    }
-
     pub(super) fn url(&self, aggregator: &AdsbAggregator) -> String {
         let base = aggregator.base_url.trim_end_matches('/');
         match (aggregator.path_style, self) {
@@ -199,12 +189,9 @@ impl AdsbEndpoint<'_> {
     }
 }
 
-#[derive(Debug)]
 enum AdsbFetchError {
     /// HTTP 429 — back off this backend (cooldown park).
     RateLimited,
-    /// HTTP 403 or another 4xx provider refusal. Body is intentionally omitted.
-    ProviderRefused { status: u16 },
     /// Request timed out. Retryable, but NOT counted toward parking.
     Timeout(eyre::Report),
     /// Other retryable failure (5xx, connect-refused, parse error).
@@ -230,7 +217,6 @@ pub struct AviationClient {
     aviationstack: Option<AviationstackConfig>,
     adsb_cooldown: Duration,
     health: Arc<Mutex<Vec<BackendHealth>>>,
-    last_adsb_aggregate_outage_log: Arc<Mutex<Option<Instant>>>,
 }
 
 impl AviationClient {
@@ -286,7 +272,6 @@ impl AviationClient {
             aviationstack: None,
             adsb_cooldown: ADSB_COOLDOWN,
             health: Arc::new(Mutex::new(health)),
-            last_adsb_aggregate_outage_log: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -359,38 +344,6 @@ impl AviationClient {
         }
     }
 
-    fn parked_backend_count(&self) -> usize {
-        let now = Instant::now();
-        let health = self.health.lock().expect("health mutex poisoned");
-        health.iter().filter(|h| h.parked_until > now).count()
-    }
-
-    fn log_aggregate_adsb_outage(
-        &self,
-        endpoint_kind: &str,
-        parked_backends: usize,
-        last_provider_outcome: Option<&str>,
-    ) {
-        let now = Instant::now();
-        let mut last_logged = self
-            .last_adsb_aggregate_outage_log
-            .lock()
-            .expect("outage log mutex poisoned");
-        if last_logged.is_some_and(|previous| {
-            now.duration_since(previous) < ADSB_AGGREGATE_OUTAGE_LOG_COOLDOWN
-        }) {
-            return;
-        }
-        *last_logged = Some(now);
-        error!(
-            endpoint_kind,
-            configured_backends = self.adsb_aggregators.len(),
-            parked_backends,
-            last_provider_outcome,
-            "all_backends_unavailable"
-        );
-    }
-
     #[cfg(test)]
     fn with_adsb_aggregator_timeout(mut self, timeout: Duration) -> Self {
         self.adsb_aggregator_timeout = timeout;
@@ -414,15 +367,7 @@ impl AviationClient {
 
         let live = self.live_backend_indices();
         if live.is_empty() {
-            let configured_backends = self.adsb_aggregators.len();
-            let parked_backends = self.parked_backend_count();
-            self.log_aggregate_adsb_outage(endpoint.kind(), parked_backends, Some("all_parked"));
-            return Err(eyre::eyre!(
-                "all_backends_unavailable endpoint_kind={} configured_backends={} parked_backends={} last_provider_outcome=all_parked",
-                endpoint.kind(),
-                configured_backends,
-                parked_backends
-            ));
+            return Err(eyre::eyre!("All ADS-B aggregators parked (rate-limited)"));
         }
 
         let futures = live.iter().map(|&idx| {
@@ -437,7 +382,6 @@ impl AviationClient {
 
         let mut per_backend: Vec<Vec<NearbyAircraft>> = Vec::new();
         let mut last_error: Option<eyre::Report> = None;
-        let mut last_provider_outcome: Option<String> = None;
 
         for (idx, name, result) in results {
             match result {
@@ -456,64 +400,28 @@ impl AviationClient {
                         "ADS-B aggregator rate-limited (429); parking"
                     );
                     self.park_backend(idx);
-                    last_provider_outcome = Some(format!("{name}:rate_limited:429"));
                     last_error = Some(eyre::eyre!("{name} returned 429"));
-                }
-                Err(AdsbFetchError::ProviderRefused { status }) if status == 403 => {
-                    warn!(
-                        provider = name,
-                        status, "ADS-B aggregator refused request; parking"
-                    );
-                    self.park_backend(idx);
-                    last_provider_outcome = Some(format!("{name}:forbidden_parked:403"));
-                    last_error = Some(eyre::eyre!("{name} returned {status}"));
-                }
-                Err(AdsbFetchError::ProviderRefused { status }) => {
-                    debug!(
-                        provider = name,
-                        status, "ADS-B aggregator returned client response"
-                    );
-                    // Non-403 4xx still feeds the error streak so a backend
-                    // persistently refusing requests eventually parks.
-                    self.record_retryable_error(idx);
-                    last_provider_outcome = Some(format!("{name}:client_response:{status}"));
-                    last_error = Some(eyre::eyre!("{name} returned {status}"));
                 }
                 Err(AdsbFetchError::Timeout(error)) => {
                     warn!(provider = name, error = ?error, "ADS-B aggregator timed out");
-                    last_provider_outcome = Some(format!("{name}:timeout"));
                     last_error = Some(error);
                 }
                 Err(AdsbFetchError::Retryable(error)) => {
                     warn!(provider = name, error = ?error, "ADS-B aggregator failed");
                     self.record_retryable_error(idx);
-                    last_provider_outcome = Some(format!("{name}:retryable_error"));
                     last_error = Some(error);
                 }
                 Err(AdsbFetchError::Fatal(error)) => {
                     warn!(provider = name, error = ?error, "ADS-B aggregator fatal; continuing");
-                    last_provider_outcome = Some(format!("{name}:fatal_error"));
                     last_error = Some(error);
                 }
             }
         }
 
         if per_backend.is_empty() {
-            let parked_backends = self.parked_backend_count();
-            self.log_aggregate_adsb_outage(
-                endpoint.kind(),
-                parked_backends,
-                last_provider_outcome.as_deref(),
-            );
             return Err(last_error
                 .unwrap_or_else(|| eyre::eyre!("All ADS-B aggregators failed"))
-                .wrap_err(format!(
-                    "all_backends_unavailable endpoint_kind={} configured_backends={} parked_backends={} last_provider_outcome={}",
-                    endpoint.kind(),
-                    self.adsb_aggregators.len(),
-                    parked_backends,
-                    last_provider_outcome.as_deref().unwrap_or("unknown")
-                )));
+                .wrap_err("All ADS-B aggregators failed"));
         }
 
         Ok(AdsbAircraftResponse {
@@ -548,11 +456,6 @@ impl AviationClient {
         let status = resp.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(AdsbFetchError::RateLimited);
-        }
-        if status.is_client_error() {
-            return Err(AdsbFetchError::ProviderRefused {
-                status: status.as_u16(),
-            });
         }
         if !status.is_success() {
             return Err(AdsbFetchError::Retryable(eyre::eyre!(
@@ -614,17 +517,7 @@ impl AviationClient {
             .await
             .wrap_err("Failed to send request to adsbdb")?;
 
-        let status = resp.status();
-        if status.is_client_error() {
-            debug!(
-                provider = "adsbdb",
-                endpoint_kind = "flight_route",
-                status = status.as_u16(),
-                "adsbdb returned client response"
-            );
-            return Ok(None);
-        }
-        if !status.is_success() {
+        if !resp.status().is_success() {
             return Ok(None);
         }
 
@@ -657,7 +550,7 @@ impl AviationClient {
         );
 
         let timeout = Duration::from_secs(config.timeout_secs);
-        let resp = self
+        let resp: AviationstackFlightsResponse = self
             .http
             .get(&url)
             .query(&[
@@ -668,35 +561,9 @@ impl AviationClient {
             .timeout(timeout)
             .send()
             .await
-            .wrap_err("Failed to send request to aviationstack")?;
-
-        let status = resp.status();
-        if status.is_client_error() {
-            let code = status.as_u16();
-            if aviationstack_4xx_is_actionable(code) {
-                warn!(
-                    provider = "aviationstack",
-                    endpoint_kind = "flight_metadata",
-                    status = code,
-                    query_key,
-                    "aviationstack refused request (auth/quota); enrichment degraded"
-                );
-            } else {
-                debug!(
-                    provider = "aviationstack",
-                    endpoint_kind = "flight_metadata",
-                    status = code,
-                    query_key,
-                    "aviationstack returned client response"
-                );
-            }
-            return Ok(None);
-        }
-        if !status.is_success() {
-            return Err(eyre::eyre!("aviationstack returned {status}"));
-        }
-
-        let resp: AviationstackFlightsResponse = resp
+            .wrap_err("Failed to send request to aviationstack")?
+            .error_for_status()
+            .wrap_err("aviationstack returned error status")?
             .json()
             .await
             .wrap_err("Failed to parse aviationstack response")?;
@@ -765,17 +632,7 @@ impl AviationClient {
             .await
             .wrap_err("Failed to send request to adsbdb")?;
 
-        let status = resp.status();
-        if status.is_client_error() {
-            debug!(
-                provider = "adsbdb",
-                endpoint_kind = "airline",
-                status = status.as_u16(),
-                "adsbdb airline lookup returned client response"
-            );
-            return Ok(None);
-        }
-        if !status.is_success() {
+        if !resp.status().is_success() {
             return Ok(None);
         }
 
@@ -830,13 +687,6 @@ impl AviationClient {
             display_name,
         }))
     }
-}
-
-/// Whether an aviationstack 4xx is operationally actionable (bad key, plan
-/// limit, quota) and so warrants a `warn` rather than a quiet `debug`. Other
-/// 4xx (e.g. 404 no-match) are routine and stay quiet.
-fn aviationstack_4xx_is_actionable(status: u16) -> bool {
-    matches!(status, 401 | 403 | 429)
 }
 
 pub(super) fn aviationstack_query(
@@ -942,55 +792,6 @@ mod tests {
             aviationstack_query(&FlightIdentifier::Callsign("DLH1929".to_string()), None),
             Some(("flight_icao", "DLH1929".to_string()))
         );
-    }
-
-    #[tokio::test]
-    async fn adsbdb_route_4xx_is_quiet_miss() {
-        crate::install_crypto_provider();
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/callsign/DLH1234"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden secret body"))
-            .mount(&server)
-            .await;
-
-        let client = AviationClient::new_with_adsb_aggregators(
-            Vec::new(),
-            server.uri(),
-            "http://nominatim.test".to_string(),
-            reqwest::Client::new(),
-        );
-
-        let route = client
-            .get_flight_route("DLH1234")
-            .await
-            .expect("4xx is a sanitized provider outcome");
-        assert!(route.is_none());
-    }
-
-    #[tokio::test]
-    async fn aviationstack_4xx_is_quiet_miss_without_body() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/flights"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("no matching flights"))
-            .mount(&server)
-            .await;
-
-        let client = aviation_client().with_aviationstack(
-            Some(SecretString::new("test-key".into())),
-            server.uri(),
-            5,
-        );
-
-        let metadata = client
-            .get_aviationstack_flight_metadata(
-                &FlightIdentifier::Callsign("DLH1234".to_string()),
-                Some("DLH1234"),
-            )
-            .await
-            .expect("4xx is a sanitized provider outcome");
-        assert!(metadata.is_none());
     }
 
     // Under parallel fan-out both backends are queried; the 5xx one is
@@ -1239,31 +1040,6 @@ mod tests {
         assert!(matches!(err, AdsbFetchError::RateLimited));
     }
 
-    #[tokio::test]
-    async fn fetch_once_classifies_403_as_provider_refused() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/hex/3c6589"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden secret body"))
-            .mount(&server)
-            .await;
-
-        let client =
-            test_client_with_aggregators(vec![AdsbAggregator::readsb_v2("primary", server.uri())]);
-        let aggregator = AdsbAggregator::readsb_v2("primary", server.uri());
-        let url = format!("{}/hex/3c6589", server.uri());
-
-        let err = client
-            .fetch_adsb_response_once(&aggregator, &url)
-            .await
-            .expect_err("403 is an error");
-        assert!(matches!(
-            err,
-            AdsbFetchError::ProviderRefused { status: 403 }
-        ));
-        assert!(!format!("{err:?}").contains("secret body"));
-    }
-
     #[test]
     fn health_all_available_on_construction() {
         let client = test_client_with_aggregators(vec![
@@ -1420,72 +1196,6 @@ mod tests {
         assert_eq!(b.received_requests().await.unwrap().len(), 2);
     }
 
-    #[test]
-    fn aviationstack_auth_and_quota_4xx_are_actionable() {
-        // Auth / plan / quota refusals warrant an operator-visible warn.
-        assert!(aviationstack_4xx_is_actionable(401));
-        assert!(aviationstack_4xx_is_actionable(403));
-        assert!(aviationstack_4xx_is_actionable(429));
-        // Routine "no match" / bad-request responses stay quiet.
-        assert!(!aviationstack_4xx_is_actionable(404));
-        assert!(!aviationstack_4xx_is_actionable(400));
-        assert!(!aviationstack_4xx_is_actionable(422));
-    }
-
-    #[tokio::test]
-    async fn merged_query_streak_parks_backend_on_persistent_4xx() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/hex/3c6589"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&server)
-            .await;
-
-        let client =
-            test_client_with_aggregators(vec![AdsbAggregator::readsb_v2("only", server.uri())])
-                .with_adsb_cooldown(Duration::from_secs(60));
-
-        // A non-403 4xx must feed the error streak like any other failure, so a
-        // backend that keeps returning it parks after ERROR_STREAK_PARK strikes
-        // and is no longer queried.
-        for _ in 0..(ERROR_STREAK_PARK + 1) {
-            let _ = client.get_aircraft_by_hex("3c6589").await;
-        }
-
-        assert_eq!(
-            server.received_requests().await.unwrap().len(),
-            ERROR_STREAK_PARK as usize,
-            "non-403 4xx parks the backend after the streak threshold"
-        );
-    }
-
-    #[tokio::test]
-    async fn merged_query_parks_backend_on_403() {
-        let (a, b) = tokio::join!(MockServer::start(), MockServer::start());
-        Mock::given(method("GET"))
-            .and(path("/hex/3c6589"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden secret body"))
-            .mount(&a)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/hex/3c6589"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(aircraft_response("DLH1")))
-            .mount(&b)
-            .await;
-
-        let client = test_client_with_aggregators(vec![
-            AdsbAggregator::readsb_v2("a", a.uri()),
-            AdsbAggregator::readsb_v2("b", b.uri()),
-        ])
-        .with_adsb_cooldown(Duration::from_secs(60));
-
-        let first = client.get_aircraft_by_hex("3c6589").await.unwrap().unwrap();
-        assert_eq!(first.flight.as_deref(), Some("DLH1"));
-        let _ = client.get_aircraft_by_hex("3c6589").await.unwrap();
-        assert_eq!(a.received_requests().await.unwrap().len(), 1, "A parked");
-        assert_eq!(b.received_requests().await.unwrap().len(), 2);
-    }
-
     #[tokio::test]
     async fn merged_query_timeout_does_not_park() {
         let (slow, fast) = tokio::join!(MockServer::start(), MockServer::start());
@@ -1536,31 +1246,5 @@ mod tests {
             AdsbAggregator::readsb_v2("b", b.uri()),
         ]);
         assert!(client.get_aircraft_by_hex("3c6589").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn merged_query_all_backends_parked_reports_aggregate_outage() {
-        let (a, b) = tokio::join!(MockServer::start(), MockServer::start());
-        for server in [&a, &b] {
-            Mock::given(method("GET"))
-                .and(path("/hex/3c6589"))
-                .respond_with(ResponseTemplate::new(403))
-                .mount(server)
-                .await;
-        }
-
-        let client = test_client_with_aggregators(vec![
-            AdsbAggregator::readsb_v2("a", a.uri()),
-            AdsbAggregator::readsb_v2("b", b.uri()),
-        ])
-        .with_adsb_cooldown(Duration::from_secs(60));
-
-        let first = client.get_aircraft_by_hex("3c6589").await;
-        assert!(first.is_err());
-        let second = client.get_aircraft_by_hex("3c6589").await.unwrap_err();
-        let message = format!("{second:#}");
-        assert!(message.contains("all_backends_unavailable"), "{message}");
-        assert!(message.contains("configured_backends=2"), "{message}");
-        assert!(!message.contains("forbidden secret body"));
     }
 }

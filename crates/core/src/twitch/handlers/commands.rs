@@ -25,10 +25,7 @@ use crate::{
 
 /// Configuration for the generic command handler.
 pub struct CommandHandlerConfig<T: Transport, L: LoginCredentials> {
-    /// Pre-subscribed broadcast receiver, created in `spawn_handlers` before
-    /// any handler task runs so messages broadcast during startup are
-    /// buffered instead of lost.
-    pub broadcast_rx: broadcast::Receiver<ServerMessage>,
+    pub broadcast_tx: broadcast::Sender<ServerMessage>,
     pub client: Arc<TwitchIRCClient<T, L>>,
     /// Bootstrap AI config (api_key only). `None` disables `!ai`. All other
     /// AI knobs are read from the dashboard settings snapshot at startup.
@@ -71,7 +68,7 @@ where
     info!("Generic Command Handler started");
 
     let CommandHandlerConfig {
-        broadcast_rx,
+        broadcast_tx,
         client,
         ai_config,
         llm,
@@ -100,6 +97,8 @@ where
     // Snapshot of the dashboard-managed settings at startup. Reads below use
     // these values; Tasks 6+ make selected commands consume the handle live.
     let snapshot = settings.load_full();
+
+    let broadcast_rx = broadcast_tx.subscribe();
 
     // Combine pre-built LLM client with AI bootstrap; both must be present to enable !ai.
     let llm_client: Option<(Arc<dyn LlmClient>, AiBootstrap)> = match (llm, ai_config) {
@@ -207,8 +206,9 @@ where
             tx.clone(),
         )));
         cmd_list.push(Box::new(aviation::commands::flights::FlightCommand::new(
-            tx,
+            tx.clone(),
         )));
+        cmd_list.push(Box::new(aviation::commands::info::InfoCommand::new(tx)));
     }
 
     if let (Some((llm, ai_boot)), Some(ai_memory_v2)) = (llm_client, ai_memory_v2) {
@@ -277,13 +277,6 @@ where
             commands::news_cooldown_duration,
         ));
 
-        let model_catalog = Arc::new(ai::model_catalog::ModelCatalog::new(
-            reqwest::Client::builder()
-                .user_agent(crate::APP_USER_AGENT)
-                .build()
-                .expect("build model catalog HTTP client"),
-        ));
-
         cmd_list.push(Box::new(ai::command::AiCommand::new(
             ai::command::AiCommandDeps {
                 llm_client: llm.clone(),
@@ -294,7 +287,6 @@ where
                 emotes: emote_provider,
                 bot_username: bot_username.clone(),
                 doener: doener.clone(),
-                model_catalog,
             },
         )));
         cmd_list.push(Box::new(commands::news::NewsCommand::new(

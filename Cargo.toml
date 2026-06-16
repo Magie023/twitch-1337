@@ -21,7 +21,7 @@ axum = { version = "0.8", default-features = false, features = ["form", "http1",
 # serde_html_form-backed Form extractor: parses repeated urlencoded keys into
 # Vec and a single occurrence into a 1-element Vec (plain axum::Form/serde_urlencoded
 # rejects a lone `calendar_days=Thu` as "expected a sequence").
-axum-extra = { version = "0.12", default-features = false, features = ["form"] }
+axum-extra = { version = "0.10", default-features = false, features = ["form"] }
 base64 = "0.22"
 bytesize = { version = "2", features = ["serde"] }
 chrono = { version = "0.4.44", features = ["now", "serde"], default-features = false }

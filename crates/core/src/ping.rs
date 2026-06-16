@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use eyre::{Result, WrapErr, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 const PINGS_FILENAME: &str = "pings.ron";
 const PING_ACTOR_CHANNEL: usize = 64;
@@ -121,26 +121,10 @@ impl PingHandle {
         Self(Arc::new(tx))
     }
 
-    /// Returns `None` when the ping actor is gone (channel closed or reply
-    /// dropped). Callers map that to a safe default so a dead actor degrades
-    /// ping features instead of panicking inside handler tasks.
-    async fn send<T>(&self, make_cmd: impl FnOnce(oneshot::Sender<T>) -> PingCommand) -> Option<T> {
+    async fn send<T>(&self, make_cmd: impl FnOnce(oneshot::Sender<T>) -> PingCommand) -> T {
         let (tx, rx) = oneshot::channel();
-        if self.0.send(make_cmd(tx)).await.is_err() {
-            warn!("ping actor unavailable, dropping command");
-            return None;
-        }
-        match rx.await {
-            Ok(value) => Some(value),
-            Err(_) => {
-                warn!("ping actor dropped reply channel");
-                None
-            }
-        }
-    }
-
-    fn actor_gone_err<T>() -> Result<T> {
-        Err(eyre::eyre!("Ping-System ist gerade nicht verfügbar"))
+        let _ = self.0.send(make_cmd(tx)).await;
+        rx.await.expect("ping actor dropped")
     }
 
     pub async fn create_ping(
@@ -158,12 +142,10 @@ impl PingHandle {
             reply,
         })
         .await
-        .unwrap_or_else(Self::actor_gone_err)
     }
     pub async fn delete_ping(&self, name: String) -> Result<()> {
         self.send(|reply| PingCommand::DeletePing { name, reply })
             .await
-            .unwrap_or_else(Self::actor_gone_err)
     }
     pub async fn edit_template(&self, name: String, template: String) -> Result<()> {
         self.send(|reply| PingCommand::EditTemplate {
@@ -172,7 +154,6 @@ impl PingHandle {
             reply,
         })
         .await
-        .unwrap_or_else(Self::actor_gone_err)
     }
     pub async fn add_member(&self, ping_name: String, username: String) -> Result<()> {
         self.send(|reply| PingCommand::AddMember {
@@ -181,7 +162,6 @@ impl PingHandle {
             reply,
         })
         .await
-        .unwrap_or_else(Self::actor_gone_err)
     }
     pub async fn remove_member(&self, ping_name: String, username: String) -> Result<()> {
         self.send(|reply| PingCommand::RemoveMember {
@@ -190,7 +170,6 @@ impl PingHandle {
             reply,
         })
         .await
-        .unwrap_or_else(Self::actor_gone_err)
     }
     pub async fn try_record_trigger(
         &self,
@@ -207,22 +186,16 @@ impl PingHandle {
             reply,
         })
         .await
-        .unwrap_or(TriggerDecision::Skip)
     }
     pub async fn snapshot(&self) -> Vec<PingView> {
-        self.send(|reply| PingCommand::Snapshot { reply })
-            .await
-            .unwrap_or_default()
+        self.send(|reply| PingCommand::Snapshot { reply }).await
     }
     pub async fn get_one(&self, name: String) -> Option<PingView> {
-        self.send(|reply| PingCommand::GetOne { name, reply })
-            .await
-            .flatten()
+        self.send(|reply| PingCommand::GetOne { name, reply }).await
     }
     pub async fn list_for_user(&self, username: String) -> Vec<String> {
         self.send(|reply| PingCommand::ListForUser { username, reply })
             .await
-            .unwrap_or_default()
     }
     pub async fn is_member(&self, ping_name: String, username: String) -> bool {
         self.send(|reply| PingCommand::IsMember {
@@ -231,7 +204,6 @@ impl PingHandle {
             reply,
         })
         .await
-        .unwrap_or(false)
     }
 }
 
@@ -382,7 +354,7 @@ impl PingManager {
         store.pings.retain(|name, ping| match validate_template(&ping.template) {
             Ok(()) => true,
             Err(e) => {
-                tracing::warn!(ping = %name, error = ?e, "Dropping ping with invalid template on load");
+                tracing::warn!(ping = %name, error = %e, "Dropping ping with invalid template on load");
                 false
             }
         });
@@ -602,30 +574,6 @@ mod tests {
         .await
         .unwrap();
         mgr
-    }
-
-    #[tokio::test]
-    async fn handle_survives_dead_actor() {
-        let (tx, rx) = mpsc::channel(1);
-        drop(rx);
-        let handle = PingHandle::new(tx);
-        assert!(
-            handle
-                .create_ping("x".into(), "Hey {mentions}".into(), "admin".into(), None)
-                .await
-                .is_err()
-        );
-        assert!(handle.delete_ping("x".into()).await.is_err());
-        assert!(matches!(
-            handle
-                .try_record_trigger("x".into(), "alice".into(), Duration::from_secs(1), false)
-                .await,
-            TriggerDecision::Skip
-        ));
-        assert!(handle.snapshot().await.is_empty());
-        assert!(handle.get_one("x".into()).await.is_none());
-        assert!(handle.list_for_user("alice".into()).await.is_empty());
-        assert!(!handle.is_member("x".into(), "alice".into()).await);
     }
 
     #[tokio::test]
