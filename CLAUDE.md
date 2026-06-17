@@ -39,7 +39,7 @@ Linear history required, force-push + delete blocked, conversations must resolve
 |---|---|---|
 | `fmt` | ci.yml | cargo fmt --check |
 | `clippy` | ci.yml | cargo clippy --workspace --all-targets -- -D warnings |
-| `test` | ci.yml | cargo nextest run --workspace |
+| `test` | ci.yml | cargo llvm-cov nextest --workspace (lcov artifact; no threshold gate) |
 | `cargo audit` | ci.yml | RustSec CVE scan of Cargo.lock via rustsec/audit-check |
 | `hadolint (Dockerfile)` | sast.yml | Dockerfile lint, SARIF → Security tab |
 | `trivy config (IaC)` | sast.yml | IaC misconfig scan, HIGH/CRITICAL only |
@@ -75,8 +75,11 @@ current.
 3. `gh pr merge --squash`
 
 **Release flow (rolling):**
-1. Merge a PR into `main`. `docker.yml` triggers on push to main with
-   `paths-ignore` for docs/spec-only changes (no needless rebuilds).
+1. Merge a PR into `main`. `docker.yml` triggers on every push to `main`;
+   a `dorny/paths-filter` gate (`.github/path-filters.yml`) skips the build
+   when only docs, workflows, or other non-image paths changed. Use
+   **Actions → Docker → Run workflow** (`workflow_dispatch`) to force a
+   rebuild when needed (rollback verification, cache bust).
 2. CI builds the musl static binary and pushes the image to
    `ghcr.io/chronophylos/twitch-1337` with tags `latest` and
    `b<github.run_number>` (e.g. `b1234`).
@@ -209,6 +212,8 @@ Integration-testable via `TestBotBuilder` in `tests/common/`.
 `src/twitch/handlers/latency.rs`: `LATENCY_PING_INTERVAL=300s`, `LATENCY_EMA_ALPHA=0.2`.
 
 `src/aviation/tracker.rs`: `MAX_TRACKED_FLIGHTS=12`, `MAX_FLIGHTS_PER_USER=3`, `TRACKING_LOST_THRESHOLD=300s`, `TRACKING_LOST_REMOVAL=1800s`, `POLL_FAST/NORMAL/SLOW=30/60/120s`.
+
+`src/aviation/tracker/debug_journal.rs`: `DEBUG_JOURNAL_KEEP_FILES=30` (daily JSONL files retained under `$DATA_DIR/flight-tracker-debug/`; older pruned on tracker startup + date-rollover).
 
 ## Binary / Docker
 

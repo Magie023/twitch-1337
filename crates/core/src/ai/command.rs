@@ -20,6 +20,7 @@ use crate::ai::memory::store::MemoryStore;
 use crate::ai::memory::tools::{ChatTurnExecutor, ChatTurnExecutorOpts, chat_turn_tools};
 use crate::ai::memory::transcript::TranscriptWriter;
 use crate::ai::memory::types::Role;
+use crate::ai::model_catalog::ModelCatalog;
 use crate::commands::{Command, CommandContext};
 use crate::cooldown::{PerUserCooldown, format_cooldown_remaining};
 use crate::settings::{Settings, SettingsHandle};
@@ -106,6 +107,7 @@ pub struct AiCommand {
     emotes: Option<Arc<SevenTvEmoteProvider>>,
     bot_username: String,
     doener: Arc<crate::doener::DoeneratlasClient>,
+    model_catalog: Arc<ModelCatalog>,
 }
 
 pub struct AiCommandDeps {
@@ -117,6 +119,7 @@ pub struct AiCommandDeps {
     pub emotes: Option<Arc<SevenTvEmoteProvider>>,
     pub bot_username: String,
     pub doener: Arc<crate::doener::DoeneratlasClient>,
+    pub model_catalog: Arc<ModelCatalog>,
 }
 
 pub const GROK_ALIAS_TRIGGER: &str = "@grok";
@@ -158,6 +161,7 @@ impl AiCommand {
             emotes: deps.emotes,
             bot_username: deps.bot_username,
             doener: deps.doener,
+            model_catalog: deps.model_catalog,
         }
     }
 }
@@ -333,16 +337,21 @@ where
 
         debug!(user = %user, instruction = %instruction, "Processing AI command");
 
+        // Record before any outbound I/O so a slow catalog fetch cannot widen
+        // the window between cooldown.check and cooldown.record.
+        self.cooldown.record(user).await;
+
         // Snapshot connection knobs once per turn so dashboard edits take
         // effect on the next invocation without a bot restart.
         let snap = self.settings.load();
         let model = snap.ai.connection.model.clone();
+        let connection = snap.ai.connection.clone();
         let reasoning_effort = snap.ai.connection.reasoning_effort.clone();
         let service_tier = snap.ai.connection.service_tier.clone();
         let persona_name = snap.ai.behavior.persona_name.clone();
         drop(snap);
 
-        self.cooldown.record(user).await;
+        let model_display = self.model_catalog.display_name(&connection, &model).await;
 
         let mem = &self.memory;
         let cc = self.chat_ctx.as_ref();
@@ -371,6 +380,8 @@ where
             speaker_role: role.as_str(),
             channel: &ctx.privmsg.channel_login,
             date: &now_berlin,
+            model: &model_display,
+            model_id: &model,
         };
         let mut system_prompt_head = inject::substitute(&system_template, vars);
         let instructions_head = inject::substitute(&instructions_template, vars);

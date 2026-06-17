@@ -1,0 +1,20 @@
+---
+description: Run fmt, clippy, and tests before claiming work is done
+alwaysApply: true
+---
+
+# CI gate
+
+Before finishing any task that touches Rust code, run in order:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo nextest run --workspace
+```
+
+If `cargo nextest` is not installed, `cargo test --workspace` is acceptable locally — CI uses nextest.
+
+`cargo audit` is optional locally but runs in CI; run it when touching dependencies.
+
+Do not claim work is complete until these pass. Fix failures before committing.

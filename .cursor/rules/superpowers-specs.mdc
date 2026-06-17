@@ -1,0 +1,14 @@
+---
+description: Check design specs before non-trivial feature work
+alwaysApply: true
+---
+
+# Superpowers specs
+
+For non-trivial features or cross-cutting changes, check `docs/superpowers/specs/` for an existing design before inventing architecture.
+
+- Specs are dated `YYYY-MM-DD-<topic>-design.md`
+- Matching plans live in `docs/superpowers/plans/`
+- If a spec exists, implement against it; if requirements diverge, note the delta in the PR
+
+Skip for obvious one-line fixes, dependency bumps, and pure refactors with no design impact.

@@ -1,0 +1,21 @@
+---
+description: Local dev commands for bot, dashboard, and worktrees
+alwaysApply: true
+---
+
+# Local dev
+
+Use `just` recipes from the Justfile — prefer these over inventing cargo incantations.
+
+| Command | Use |
+|---|---|
+| `just dev` | Full bot + dashboard, `DATA_DIR=./dev-data`, debug logging, `dev-login` OAuth bypass |
+| `just dev-web` | Dashboard only (no IRC) on `:8761` — ideal for worktree UI work |
+| `just dev-web-watch` | Same with `cargo watch` + livereload |
+| `just e2e` | Browser e2e (chromedriver + Chrome required) |
+
+Worktrees: run `just dev-web bind=127.0.0.1:8762` (or another port) alongside the main checkout. Both can share `./dev-data`; atomic tmp+rename means last-writer-wins without corruption.
+
+Dev session: open `/_dev/login` once to mint a mod session (requires `dev-login` feature — production Docker builds omit it).
+
+Never commit `./dev-data/`, `./prod-data/`, or local `config.toml` with real credentials.

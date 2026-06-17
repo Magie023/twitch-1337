@@ -1,0 +1,28 @@
+---
+description: PR labels, required checks, and merge conventions
+alwaysApply: true
+---
+
+# Pull requests
+
+## Before opening
+
+- Branch from `main` in a worktree (see `git-branches-worktrees.mdc`)
+- Run CI gate locally
+- Push feature branch only — never `main`
+
+## gh pr create
+
+Include **Summary** and **Test plan**. Title can be normal prose (squash commit uses PR title unless overridden).
+
+Apply labels via `gh pr edit`:
+
+- Exactly one `type:` (`type:feat`, `type:bug`, `type:refactor`, `type:security`, `type:docs`)
+- One or more `system:` when applicable (`system:ai`, `system:aviation`, `system:ping`, `system:tracker`, `system:schedule`, `system:irc`, `system:config`)
+- `type:security` supersedes `type:bug`
+
+Full label tables: [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## Merge
+
+Wait for all required status checks green (see CLAUDE.md § CI). Rebase on `main` if strict blocks merge. Merge with squash: `gh pr merge --squash`.

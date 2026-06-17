@@ -1,0 +1,7 @@
+code:
+  - 'crates/**'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - '.cargo/**'
+  - 'Dockerfile'
+  - '.dockerignore'

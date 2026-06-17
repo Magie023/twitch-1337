@@ -1,0 +1,16 @@
+---
+description: SHA-pin security-critical GitHub Actions when editing workflows
+globs: .github/**/*
+alwaysApply: false
+---
+
+# Workflow action pinning
+
+When editing `.github/workflows/`:
+
+- **SHA-pin** security-critical actions with a version comment:
+  `rustsec/audit-check`, `gitleaks/gitleaks-action`, `zizmorcore/zizmor-action`, `actions/delete-package-versions`, `aquasecurity/trivy-action`
+- Others may use major tags; Dependabot keeps them current
+- Follow existing zizmor ignore comments where unpinned is intentional (`dtolnay/rust-toolchain`, `taiki-e/install-action`)
+
+Reason: supply-chain incidents (e.g. trivy, Mar 2026) — see CLAUDE.md § Action pinning.

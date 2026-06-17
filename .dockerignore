@@ -16,8 +16,19 @@ target/
 *.md
 
 # Ignore secrets and runtime state
-config.toml
-token.ron
+# (patterns without **/ only match at the context root)
+**/config.toml
+**/*.ron
+.env
+
+# Ignore local/prod data mounts (just mount-prod-data, dev runs)
+prod-data
+dev-data
+data
+
+# Ignore agent/worktree clutter
+.claude
+.worktrees
 
 # Ignore CI/CD files
 .github/

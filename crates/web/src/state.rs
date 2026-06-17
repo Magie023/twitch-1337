@@ -15,6 +15,7 @@ use secrecy::SecretString;
 use tokio::sync::RwLock;
 use tower_cookies::Key;
 use twitch_1337_core::ai::memory::store::MemoryStore;
+use twitch_1337_core::ai::model_catalog::ModelCatalog;
 use twitch_1337_core::aviation::TrackerCommand;
 use twitch_1337_core::commands::leaderboard::PersonalBest;
 use twitch_1337_core::config::AiBootstrap;
@@ -89,6 +90,8 @@ pub struct WebState {
     pub model_cache: Arc<ModelListCache>,
     /// Shared `reqwest::Client` for outbound HTTP (model list proxy, etc.).
     pub http: reqwest::Client,
+    /// OpenRouter model catalog (id → display name) for the picker and `!ai`.
+    pub model_catalog: Arc<ModelCatalog>,
     /// Per-schedule runtime telemetry (last_fired_at, fires_today, day_anchor).
     /// Shared with the IRC `schedule_runner` orchestrator so the dashboard
     /// surfaces live fire counters.

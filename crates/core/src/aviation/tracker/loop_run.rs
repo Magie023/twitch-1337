@@ -11,7 +11,8 @@ use crate::util::clock::Clock;
 
 use super::{
     TrackerCommand,
-    commands::{poll_all_flights, process_command},
+    commands::{poll_all_flights_with_commands, process_command},
+    debug_journal::{DEBUG_JOURNAL_KEEP_FILES, prune_debug_journals},
     schedule::next_poll_at,
     state::load_tracker_state,
 };
@@ -29,6 +30,9 @@ pub async fn run_flight_tracker<T, L>(
 {
     let mut state = load_tracker_state(&data_dir).await;
     info!(flights = state.flights.len(), "Flight tracker started");
+
+    prune_debug_journals(&data_dir, DEBUG_JOURNAL_KEEP_FILES).await;
+    let mut last_journal_date = clock.now_utc().date_naive();
 
     loop {
         if state.flights.is_empty() {
@@ -58,17 +62,35 @@ pub async fn run_flight_tracker<T, L>(
                 .await;
             }
 
-            poll_all_flights(
+            let deferred_commands = poll_all_flights_with_commands(
                 &mut state,
                 &sender,
                 &channel,
                 &aviation_client,
                 &data_dir,
                 &*clock,
+                Some(&mut cmd_rx),
             )
             .await;
+            for cmd in deferred_commands {
+                process_command(
+                    cmd,
+                    &mut state,
+                    &sender,
+                    &aviation_client,
+                    &data_dir,
+                    &*clock,
+                )
+                .await;
+            }
 
             let now = clock.now_utc();
+            // Roll the journal forward: once the date changes, drop stale files.
+            let today = now.date_naive();
+            if today != last_journal_date {
+                prune_debug_journals(&data_dir, DEBUG_JOURNAL_KEEP_FILES).await;
+                last_journal_date = today;
+            }
             let next_at = next_poll_at(&state.flights, now).unwrap_or(now);
             tracing::debug!(
                 next_poll_at = %next_at,

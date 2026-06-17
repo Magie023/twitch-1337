@@ -4,6 +4,7 @@ use tokio::fs;
 use tracing::{info, warn};
 
 use super::{FlightIdentifier, FlightTrackerState, HexSource, TargetConfirmation};
+use crate::aviation::tracker::metadata::seed_flight_aliases;
 
 const FLIGHTS_FILENAME: &str = "flights.ron";
 
@@ -37,6 +38,12 @@ fn migrate_target_confirmations(state: &mut FlightTrackerState) -> usize {
     migrated
 }
 
+fn seed_missing_aliases(state: &mut FlightTrackerState) {
+    for flight in &mut state.flights {
+        seed_flight_aliases(flight);
+    }
+}
+
 /// Seed `last_visible_at` (the tracking-lost removal anchor) for flights
 /// persisted before the field existed. Prefer the freshest ADS-B poll timestamp
 /// when present so restored `AircraftVisible` flights do not collapse the grace
@@ -66,6 +73,7 @@ pub(crate) async fn load_tracker_state(data_dir: &Path) -> FlightTrackerState {
             Ok(mut state) => {
                 let cleared_pending_hexes = clear_pending_callsign_hexes(&mut state);
                 let migrated_target_confirmations = migrate_target_confirmations(&mut state);
+                seed_missing_aliases(&mut state);
                 let backfilled_visible_anchors = backfill_visible_anchor(&mut state);
                 info!(
                     flights = state.flights.len(),

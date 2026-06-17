@@ -206,20 +206,22 @@ pub(crate) fn generate_stats_message(count: usize, user_list: &[String]) -> Stri
     }
     match count {
         0 => one_of(&["Erm", "fuh"]).to_string(),
-        1 => one_of(&[
-            format!(
-                "@{} zumindest einer {}",
-                user_list
-                    .first()
-                    .expect("Count should equal user list length"),
-                one_of(&["fuh", "uhh"])
-            ),
-            format!(
+        1 => {
+            let zu_viel = format!(
                 "War wohl zu viel verlangt {}",
                 one_of(&["BRUHSIT", "UltraMad", "Madeg"])
-            ),
-        ])
-        .clone(),
+            );
+            // count and user_list arrive as independent params; degrade
+            // gracefully if a caller ever passes (1, []) instead of panicking.
+            match user_list.first() {
+                Some(user) => one_of(&[
+                    format!("@{user} zumindest einer {}", one_of(&["fuh", "uhh"])),
+                    zu_viel,
+                ])
+                .clone(),
+                None => zu_viel,
+            }
+        }
         2..=3 if !user_list.iter().any(|u| u == "gargoyletec") => {
             format!(
                 "{count}{} gnocci {}",
@@ -575,6 +577,15 @@ mod tests {
             .iter()
             .map(|(user, ms)| ((*user).to_string(), PersonalBest { ms: *ms, date }))
             .collect()
+    }
+
+    #[test]
+    fn stats_message_count_one_with_empty_user_list_does_not_panic() {
+        // count and user_list are independent params; a mismatched (1, []) must
+        // degrade gracefully instead of unwinding the handler task.
+        for _ in 0..50 {
+            assert!(!generate_stats_message(1, &[]).is_empty());
+        }
     }
 
     #[test]
