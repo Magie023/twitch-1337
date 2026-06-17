@@ -644,11 +644,44 @@ impl AviationClient {
         let Some(config) = &self.aviationstack else {
             return Ok(None);
         };
-        let Some((query_key, query_value)) = aviationstack_query(identifier, callsign) else {
+        let queries = aviationstack_queries(identifier, callsign);
+        if queries.is_empty() {
             debug!(identifier = %identifier, "Skipping aviationstack lookup: no callsign query");
             return Ok(None);
-        };
+        }
 
+        // Tried in order: a marketing IATA number (e.g. DE1513) may be missing
+        // from aviationstack even when the resolved operating ICAO callsign
+        // (CFG1513) is indexed, so `aviationstack_queries` appends the ICAO form.
+        // A transient error on a non-final query must not block the fallback;
+        // only the last query's error propagates.
+        let last = queries.len() - 1;
+        for (i, (query_key, query_value)) in queries.iter().enumerate() {
+            match self
+                .aviationstack_query_one(config, query_key, query_value)
+                .await
+            {
+                Ok(Some(metadata)) => return Ok(Some(metadata)),
+                Ok(None) => {}
+                Err(_) if i < last => {
+                    warn!(
+                        query_key,
+                        "aviationstack query failed; trying fallback query"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn aviationstack_query_one(
+        &self,
+        config: &AviationstackConfig,
+        query_key: &str,
+        query_value: &str,
+    ) -> Result<Option<AviationstackFlightMetadata>> {
         let url = format!("{}/flights", config.base_url.trim_end_matches('/'));
         debug!(
             query_key,
@@ -662,7 +695,7 @@ impl AviationClient {
             .get(&url)
             .query(&[
                 ("access_key", config.api_key.expose_secret()),
-                (query_key, query_value.as_str()),
+                (query_key, query_value),
                 ("limit", "1"),
             ])
             .timeout(timeout)
@@ -839,30 +872,46 @@ fn aviationstack_4xx_is_actionable(status: u16) -> bool {
     matches!(status, 401 | 403 | 429)
 }
 
-pub(super) fn aviationstack_query(
+/// Ordered aviationstack `/flights` queries to try for an identifier.
+///
+/// A marketing IATA number (e.g. DE1513) may be missing from aviationstack even
+/// when the resolved operating ICAO callsign (CFG1513) is indexed, so an IATA
+/// query is followed by the resolved ICAO as a fallback. Empty when there is
+/// nothing to query.
+pub(super) fn aviationstack_queries(
     identifier: &FlightIdentifier,
     callsign: Option<&str>,
-) -> Option<(&'static str, String)> {
+) -> Vec<(&'static str, String)> {
     let candidate = match identifier {
         FlightIdentifier::Callsign(value) => value.as_str(),
-        FlightIdentifier::Hex(_) => callsign?,
+        FlightIdentifier::Hex(_) => match callsign {
+            Some(callsign) => callsign,
+            None => return Vec::new(),
+        },
     }
     .trim();
 
     if candidate.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     let candidate = candidate.to_uppercase();
     if is_iata_flight_number(&candidate) {
-        Some(("flight_iata", candidate))
+        let mut queries = vec![("flight_iata", candidate.clone())];
+        if let Some(icao) = callsign.map(str::trim).filter(|c| !c.is_empty()) {
+            let icao = icao.to_uppercase();
+            if is_icao_flight_number(&icao) && icao != candidate {
+                queries.push(("flight_icao", icao));
+            }
+        }
+        queries
     } else if is_icao_flight_number(&candidate)
         || !matches!(identifier, FlightIdentifier::Hex(_))
         || callsign.is_some()
     {
-        Some(("flight_icao", candidate))
+        vec![("flight_icao", candidate)]
     } else {
-        None
+        Vec::new()
     }
 }
 
@@ -935,12 +984,26 @@ mod tests {
     #[test]
     fn aviationstack_query_detects_iata_and_icao_flight_numbers() {
         assert_eq!(
-            aviationstack_query(&FlightIdentifier::Callsign("LH1929".to_string()), None),
-            Some(("flight_iata", "LH1929".to_string()))
+            aviationstack_queries(&FlightIdentifier::Callsign("LH1929".to_string()), None),
+            vec![("flight_iata", "LH1929".to_string())]
         );
         assert_eq!(
-            aviationstack_query(&FlightIdentifier::Callsign("DLH1929".to_string()), None),
-            Some(("flight_icao", "DLH1929".to_string()))
+            aviationstack_queries(&FlightIdentifier::Callsign("DLH1929".to_string()), None),
+            vec![("flight_icao", "DLH1929".to_string())]
+        );
+    }
+
+    #[test]
+    fn aviationstack_query_appends_resolved_icao_fallback() {
+        assert_eq!(
+            aviationstack_queries(
+                &FlightIdentifier::Callsign("DE1513".to_string()),
+                Some("CFG1513")
+            ),
+            vec![
+                ("flight_iata", "DE1513".to_string()),
+                ("flight_icao", "CFG1513".to_string()),
+            ]
         );
     }
 

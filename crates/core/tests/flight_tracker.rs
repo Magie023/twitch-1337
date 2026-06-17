@@ -1758,3 +1758,207 @@ async fn tracker_answers_dashboard_commands_while_polling() {
         .expect("tracker should shut down")
         .unwrap();
 }
+
+/// Repro: `!track DE1513` (IATA, Condor) must find the aircraft that broadcasts
+/// the resolved ICAO callsign `CFG1513` on ADS-B, exactly like `!track CFG1513`.
+#[tokio::test]
+async fn track_iata_flight_number_resolves_to_icao_callsign_on_adsb() {
+    let bot = TestBotBuilder::new().spawn().await;
+
+    // Only the resolved ICAO callsign appears on ADS-B.
+    Mock::given(method("GET"))
+        .and(path("/callsign/CFG1513"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ac": [{
+                "hex": "3c6589",
+                "flight": "CFG1513",
+                "alt_baro": 35000,
+                "gs": 450.0,
+                "baro_rate": 0,
+                "lat": 50.0,
+                "lon": 8.5,
+                "squawk": "1000"
+            }],
+            "ctime": 0,
+            "now": 0,
+            "total": 1
+        })))
+        .with_priority(1)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    // Everything else (incl. /callsign/DE1513 and /hex/DE1513) is empty.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ac": [],
+            "ctime": 0,
+            "now": 0,
+            "total": 0
+        })))
+        .with_priority(10)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let mut bot = bot;
+    bot.send("alice", "!track DE1513").await;
+    let ack = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(
+        ack.contains("CFG1513") && !ack.to_lowercase().contains("nicht gefunden"),
+        "expected DE1513 to resolve to CFG1513 and be found, got: {ack}"
+    );
+
+    let state_path = bot.data_dir.path().join("flights.ron");
+    let persisted = tokio::fs::read_to_string(state_path).await.unwrap();
+    let state: twitch_1337::aviation::tracker::FlightTrackerState =
+        ron::from_str(&persisted).unwrap();
+    let flight = state.flights.first().expect("persisted flight");
+    assert_eq!(flight.callsign.as_deref(), Some("CFG1513"));
+    assert_eq!(
+        flight.target_confirmation,
+        TargetConfirmation::ConfirmedByCallsign
+    );
+
+    bot.shutdown().await;
+}
+
+/// Repro: with a resolvable IATA flight number (`DE1513` -> `CFG1513`), the
+/// aviationstack enrichment must query by the resolved ICAO callsign
+/// (`flight_icao=CFG1513`) when the raw `flight_iata=DE1513` query returns
+/// nothing — codeshare/marketing numbers often only resolve under the
+/// operating ICAO identity.
+#[tokio::test]
+async fn track_iata_flight_number_enriches_via_resolved_icao_query() {
+    let bot = TestBotBuilder::new()
+        .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
+        .spawn()
+        .await;
+
+    // aviationstack only knows the flight under its operating ICAO identity.
+    Mock::given(method("GET"))
+        .and(path("/flights"))
+        .and(query_param("flight_icao", "CFG1513"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "flight": { "iata": "DE1513", "icao": "CFG1513", "number": "1513" },
+                "airline": { "iata": "DE", "icao": "CFG", "name": "Condor" },
+                "departure": { "iata": "FRA", "icao": "EDDF", "scheduled": null, "actual": null, "actual_runway": null },
+                "arrival": { "iata": "PMI", "icao": "LEPA", "estimated": null, "actual": null },
+                "aircraft": { "icao24": "3c6589", "icao": "A320" }
+            }]
+        })))
+        .with_priority(1)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    // The plane is live on ADS-B under CFG1513 (same aircraft via callsign or hex).
+    let cfg1513 = serde_json::json!({
+        "ac": [{ "hex": "3c6589", "flight": "CFG1513", "alt_baro": 35000, "gs": 450.0, "baro_rate": 0, "lat": 50.0, "lon": 8.5, "squawk": "1000" }],
+        "ctime": 0, "now": 0, "total": 1
+    });
+    Mock::given(method("GET"))
+        .and(path("/callsign/CFG1513"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(cfg1513.clone()))
+        .with_priority(1)
+        .mount(&bot.adsb_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/hex/3C6589"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(cfg1513))
+        .with_priority(1)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    // Anything else (incl. flight_iata=DE1513) is empty.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [], "ac": [], "ctime": 0, "now": 0, "total": 0
+        })))
+        .with_priority(10)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let mut bot = bot;
+    bot.send("alice", "!track DE1513").await;
+    let ack = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(
+        ack.contains("FRA") && ack.contains("PMI"),
+        "DE1513 should enrich via flight_icao=CFG1513 and show the route; got: {ack}"
+    );
+
+    bot.shutdown().await;
+}
+
+/// A transient (5xx) failure on the primary IATA query must not abort the
+/// lookup before the resolved ICAO fallback (`flight_icao=CFG1513`) is tried.
+#[tokio::test]
+async fn track_iata_query_5xx_still_tries_icao_fallback() {
+    let bot = TestBotBuilder::new()
+        .with_config(enable_aviationstack)
+        .with_settings(set_aviationstack_enabled)
+        .spawn()
+        .await;
+
+    // Primary IATA query fails transiently...
+    Mock::given(method("GET"))
+        .and(path("/flights"))
+        .and(query_param("flight_iata", "DE1513"))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&bot.adsb_mock)
+        .await;
+    // ...but the ICAO fallback resolves.
+    Mock::given(method("GET"))
+        .and(path("/flights"))
+        .and(query_param("flight_icao", "CFG1513"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{
+                "flight": { "iata": "DE1513", "icao": "CFG1513", "number": "1513" },
+                "airline": { "iata": "DE", "icao": "CFG", "name": "Condor" },
+                "departure": { "iata": "FRA", "icao": "EDDF", "scheduled": null, "actual": null, "actual_runway": null },
+                "arrival": { "iata": "PMI", "icao": "LEPA", "estimated": null, "actual": null },
+                "aircraft": { "icao24": "3c6589", "icao": "A320" }
+            }]
+        })))
+        .with_priority(1)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let cfg1513 = serde_json::json!({
+        "ac": [{ "hex": "3c6589", "flight": "CFG1513", "alt_baro": 35000, "gs": 450.0, "baro_rate": 0, "lat": 50.0, "lon": 8.5, "squawk": "1000" }],
+        "ctime": 0, "now": 0, "total": 1
+    });
+    Mock::given(method("GET"))
+        .and(path("/callsign/CFG1513"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(cfg1513.clone()))
+        .with_priority(1)
+        .mount(&bot.adsb_mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/hex/3C6589"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(cfg1513))
+        .with_priority(1)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [], "ac": [], "ctime": 0, "now": 0, "total": 0
+        })))
+        .with_priority(10)
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let mut bot = bot;
+    bot.send("alice", "!track DE1513").await;
+    let ack = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(
+        ack.contains("FRA") && ack.contains("PMI"),
+        "a 5xx on flight_iata=DE1513 should fall through to flight_icao=CFG1513; got: {ack}"
+    );
+
+    bot.shutdown().await;
+}

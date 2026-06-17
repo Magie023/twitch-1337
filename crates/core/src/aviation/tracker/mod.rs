@@ -50,10 +50,11 @@ pub enum FlightIdentifier {
 impl FlightIdentifier {
     /// Parse user input into a FlightIdentifier.
     ///
-    /// IATA flight numbers (`LL####`, 3–6 chars) take precedence over the
-    /// six-character ICAO24 hex rule when both apply (e.g. `AF1234`). Such
-    /// inputs are stored as callsigns; ADS-B may fall back to hex lookup when
-    /// a callsign poll misses and the string is also valid hex.
+    /// IATA flight numbers (`LL####`, e.g. `DE1513`, `AF1234`) take precedence
+    /// over the six-character ICAO24 hex rule when both apply — the user means
+    /// a flight, and `!track` resolves it to the operating ICAO callsign. Such
+    /// inputs are stored as callsigns; ADS-B may fall back to hex lookup when a
+    /// callsign poll misses and the string is also valid hex.
     ///
     /// Remaining 6-character all-hex-digit strings are ICAO24 hex codes.
     /// Everything else is treated as a callsign and must be ASCII alphanumeric
@@ -776,6 +777,11 @@ mod tests {
 
     #[test]
     fn parse_treats_six_char_iata_flight_numbers_as_callsigns() {
+        // DE1513 (Condor) is all-hex-digit but must resolve as a flight, not a
+        // raw ICAO24 address — the regression that motivated the IATA-precedence rule.
+        let id = FlightIdentifier::parse("DE1513").unwrap();
+        assert_eq!(id, FlightIdentifier::Callsign("DE1513".to_string()));
+
         let id = FlightIdentifier::parse("AF1234").unwrap();
         assert_eq!(id, FlightIdentifier::Callsign("AF1234".to_string()));
 
