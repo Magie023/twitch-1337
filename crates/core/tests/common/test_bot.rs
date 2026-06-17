@@ -37,6 +37,17 @@ use super::irc_line::{
     reply_privmsg,
 };
 
+/// Minimum wall-clock budget for the "wait for bot output" helpers
+/// (`expect_say`/`expect_reply`/`expect_say_full`/`expect_whisper`). These
+/// return the instant a message arrives, so the timeout is only a failure
+/// deadline — a generous floor is free on the happy path. Call sites pass 2s,
+/// which flakes under `cargo llvm-cov` coverage instrumentation + nextest
+/// parallelism on a small CI runner; the floor gives ~4x headroom.
+// ponytail: floor in one place, not a timeout bump across 70+ call sites.
+// `expect_silent` is deliberately excluded — there a longer wait means a slower
+// happy path, so it must honor its caller's exact duration.
+const MIN_OUTPUT_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct TestBot {
     pub transport: TransportHandle,
     pub clock: Arc<FakeClock>,
@@ -448,6 +459,7 @@ impl TestBot {
     }
 
     pub async fn expect_say(&mut self, timeout: Duration) -> String {
+        let timeout = timeout.max(MIN_OUTPUT_TIMEOUT);
         loop {
             let raw = tokio::time::timeout(timeout, self.transport.capture.recv())
                 .await
@@ -471,6 +483,7 @@ impl TestBot {
     /// Wait for an outgoing PRIVMSG and return `(channel, body)`. The channel
     /// is the IRC `#chan` argument with the leading `#` stripped.
     pub async fn expect_say_full(&mut self, timeout: Duration) -> (String, String) {
+        let timeout = timeout.max(MIN_OUTPUT_TIMEOUT);
         loop {
             let raw = tokio::time::timeout(timeout, self.transport.capture.recv())
                 .await
@@ -492,7 +505,7 @@ impl TestBot {
     }
 
     pub async fn expect_whisper(&self, timeout: Duration) -> WhisperRecord {
-        self.whisper.expect(timeout).await
+        self.whisper.expect(timeout.max(MIN_OUTPUT_TIMEOUT)).await
     }
 
     pub async fn expect_silent(&mut self, dur: Duration) {
