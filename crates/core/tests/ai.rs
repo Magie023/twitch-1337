@@ -19,7 +19,7 @@ async fn bot_reply_pushes_persona_display_name() {
 
     // Poll for the bot entry: the chat-history push lands after say_in_reply_to
     // returns, so on a multi-thread runtime we can race the reply receipt.
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + common::GENEROUS_WAIT;
     let bot_entry = loop {
         let snap = bot.primary_history_snapshot().await;
         if let Some(e) = snap

@@ -33,7 +33,7 @@ fn set_aviationstack_enabled(o: &mut SettingsOverrides) {
 
 async fn read_debug_journal(bot: &TestBot) -> Vec<serde_json::Value> {
     let dir = bot.data_dir.path().join("flight-tracker-debug");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + common::GENEROUS_WAIT;
     loop {
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             let mut events = Vec::new();
@@ -1601,7 +1601,7 @@ async fn pending_flight_expires_without_extra_adsb_call() {
     assert_eq!(callsign_requests, 1);
 
     let state_path = bot.data_dir.path().join("flights.ron");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + common::GENEROUS_WAIT;
     loop {
         let persisted = tokio::fs::read_to_string(&state_path).await.unwrap();
         let state: twitch_1337::aviation::tracker::FlightTrackerState =
@@ -1610,7 +1610,7 @@ async fn pending_flight_expires_without_extra_adsb_call() {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("flight tracker did not clear expired flight within 5s: {state:?}");
+            panic!("flight tracker did not clear expired flight in time: {state:?}");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

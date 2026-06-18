@@ -48,7 +48,7 @@ async fn memory_v2_basic_write_and_reply() {
     wait_for_say(&mut bot, "hello alice", Duration::from_secs(3)).await;
 
     // Poll until the file appears on disk (write is synchronous in the tool executor).
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + common::GENEROUS_WAIT;
     loop {
         let body = bot.read_memory_file("users/12345.md").await;
         if body.contains("alice likes rust") {

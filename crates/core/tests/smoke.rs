@@ -30,17 +30,19 @@ async fn fake_transport_handshake_succeeds() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    // Collect the four handshake lines, waiting on the full remaining budget for
+    // each rather than a tight per-line gap: under a loaded runner the lines can
+    // arrive seconds apart without anything being wrong.
     let mut captured = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(100), handle.capture.recv()).await {
-            Ok(Some(line)) => {
-                captured.push(line);
-                if captured.len() >= 4 {
-                    break;
-                }
-            }
-            _ => break,
+    let deadline = tokio::time::Instant::now() + common::GENEROUS_WAIT;
+    while captured.len() < 4 {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match tokio::time::timeout(deadline - now, handle.capture.recv()).await {
+            Ok(Some(line)) => captured.push(line),
+            _ => break, // channel closed or deadline elapsed
         }
     }
     drop(handle);

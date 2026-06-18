@@ -42,11 +42,11 @@ use super::irc_line::{
 /// return the instant a message arrives, so the timeout is only a failure
 /// deadline — a generous floor is free on the happy path. Call sites pass 2s,
 /// which flakes under `cargo llvm-cov` coverage instrumentation + nextest
-/// parallelism on a small CI runner; the floor gives ~4x headroom.
+/// parallelism on a small CI runner; the floor gives ample headroom.
 // ponytail: floor in one place, not a timeout bump across 70+ call sites.
 // `expect_silent` is deliberately excluded — there a longer wait means a slower
 // happy path, so it must honor its caller's exact duration.
-const MIN_OUTPUT_TIMEOUT: Duration = Duration::from_secs(10);
+const MIN_OUTPUT_TIMEOUT: Duration = super::GENEROUS_WAIT;
 
 pub struct TestBot {
     pub transport: TransportHandle,
@@ -377,11 +377,12 @@ impl TestBotBuilder {
         // *after* `spawn_handlers` created the command handler's broadcast
         // receiver — so once the flag is set, injected messages can no longer
         // be lost to a not-yet-subscribed handler.
-        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let ready_deadline = tokio::time::Instant::now() + super::GENEROUS_WAIT;
         while !irc_connected.load(std::sync::atomic::Ordering::Relaxed) {
             assert!(
                 tokio::time::Instant::now() < ready_deadline,
-                "bot did not become ready within 5s"
+                "bot did not become ready within {:?}",
+                super::GENEROUS_WAIT
             );
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -554,7 +555,7 @@ impl TestBot {
             let _ = tx.send(());
         }
         if let Some(handle) = self.bot_task.take() {
-            match tokio::time::timeout(Duration::from_secs(3), handle).await {
+            match tokio::time::timeout(super::GENEROUS_WAIT, handle).await {
                 Ok(Ok(Ok(()))) => {}
                 Ok(Ok(Err(e))) => panic!("bot exited with error: {e:?}"),
                 Ok(Err(e)) => panic!("bot task panicked: {e:?}"),
@@ -592,6 +593,10 @@ impl TestBot {
     /// Poll `$DATA_DIR/memories/transcripts/today.md` until it contains
     /// `text` or `timeout` elapses (panics on timeout).
     pub async fn wait_until_transcript_contains(&self, text: &str, timeout: Duration) {
+        // Floor the caller's budget to the shared generous deadline: this only
+        // bounds how long to wait before failing, so widening it never weakens
+        // the assertion (returns the instant the text appears).
+        let timeout = timeout.max(super::GENEROUS_WAIT);
         let path = self.transcripts_dir().join("today.md");
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
