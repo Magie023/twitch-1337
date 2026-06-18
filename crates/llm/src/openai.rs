@@ -196,13 +196,36 @@ fn parse_tool_call_arguments(
     }
 }
 
-/// Extract the error message from a 2xx response body that carries an API-level
-/// error (e.g. OpenRouter rate-limit: `{"error":{"message":"..."}}`).
+/// Extract the diagnostic detail from a 2xx response body that carries an
+/// API-level error (e.g. OpenRouter rate-limit: `{"error":{"message":"..."}}`,
+/// or an upstream provider failure: `{"error":{"message":"Provider returned
+/// error","code":...,"metadata":{...}}}`).
+///
+/// Composes `message` + `code` + `metadata` when present so the resulting
+/// `LlmError::Provider { body }` carries enough to diagnose the failure. Returns
+/// `None` when there is no `error` object (a normal success response).
 fn extract_api_error(body: &serde_json::Value) -> Option<String> {
-    body.get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())
-        .map(str::to_owned)
+    let error = body.get("error")?;
+    let message = error.get("message").and_then(|m| m.as_str());
+    let code = error.get("code");
+    let metadata = error.get("metadata");
+
+    // An `error` object with nothing useful inside is not an error.
+    if message.is_none() && code.is_none() && metadata.is_none() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if let Some(message) = message {
+        parts.push(message.to_owned());
+    }
+    if let Some(code) = code {
+        parts.push(format!("code={code}"));
+    }
+    if let Some(metadata) = metadata {
+        parts.push(format!("metadata={metadata}"));
+    }
+    Some(parts.join(" "))
 }
 
 // --- Client ---
@@ -668,6 +691,22 @@ mod tests {
             extract_api_error(&body).as_deref(),
             Some("rate limit exceeded")
         );
+    }
+
+    #[test]
+    fn extract_api_error_includes_code_and_metadata() {
+        let body = serde_json::json!({
+            "error": {
+                "message": "Provider returned error",
+                "code": 502,
+                "metadata": {"raw": "upstream boom", "provider_name": "acme"}
+            }
+        });
+        let detail = extract_api_error(&body).expect("error body");
+        assert!(detail.contains("Provider returned error"));
+        assert!(detail.contains("502"));
+        assert!(detail.contains("upstream boom"));
+        assert!(detail.contains("acme"));
     }
 
     #[test]

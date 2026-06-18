@@ -11,7 +11,7 @@ use chrono_tz::Tz;
 use eyre::Result;
 use llm::{AgentOpts, AgentOutcome, LlmClient, Message, ToolChatCompletionRequest, run_agent};
 use tokio::sync::Notify;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::ai::memory::inject::{
     BuildOpts, FenceLabel, InvocationChannel, SubstitutionVars, build_chat_turn_context,
@@ -210,7 +210,7 @@ pub async fn run_ritual(
         Ok(AgentOutcome::Text(_)) => info!(rotated = %dated.display(), "dreamer ritual finished"),
         Ok(AgentOutcome::MaxRoundsExceeded) => warn!("dreamer max_rounds reached"),
         Ok(AgentOutcome::Timeout { round }) => warn!(round, "dreamer per-round timeout"),
-        Err(e) => warn!(error = ?e, "dreamer llm error"),
+        Err(e) => error!(error = ?e, "dreamer llm error"),
     }
     Ok(())
 }

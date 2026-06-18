@@ -508,7 +508,7 @@ where
                 None
             }
             Err(e) => {
-                warn!(error = ?e, "AI llm error");
+                error!(error = ?e, "AI llm error");
                 if let Some(reply) = user_facing_provider_message(&e) {
                     ctx.sender.reply(ctx.privmsg, reply).await;
                 }
@@ -552,7 +552,7 @@ where
 /// Map a provider-side LLM failure to a short German chat reply.
 ///
 /// 5xx and decode/transport errors stay silent — they are already logged at
-/// warn! and are usually transient. Authentication, payment, and rate-limit
+/// error! and are usually transient. Authentication, payment, and rate-limit
 /// problems get a hint in chat so the bot doesn't appear to silently swallow
 /// `!ai` requests when, e.g., the OpenRouter wallet is empty.
 fn user_facing_provider_message(err: &LlmError) -> Option<&'static str> {
