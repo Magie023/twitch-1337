@@ -220,3 +220,17 @@ Integration-testable via `TestBotBuilder` in `tests/common/`.
 Musl static build: `cargo build --release --target x86_64-unknown-linux-musl` (~6MB, works on Alpine/busybox, FROM scratch image). rustls not OpenSSL. Multi-stage Dockerfile with cargo-chef.
 
 Verify static: `ldd target/x86_64-unknown-linux-musl/release/twitch-1337` → "statically linked".
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (`Chronophylos/twitch-1337`), managed via the `gh` CLI. External PRs are **not** a triage request surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical triage roles map to the repo's existing `status:` prefix (`status:needs-triage`, `status:needs-info`, `status:ready-for-agent`, `status:ready-for-human`, `status:wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
