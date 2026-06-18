@@ -163,14 +163,14 @@ where
             );
             let bearing = random_flight::geo::initial_bearing(*lat, *lon, ac_lat, ac_lon);
             let direction = match random_flight::geo::cardinal_direction(bearing) {
-                "N" => "↑",
-                "NE" => "↗",
-                "E" => "→",
-                "SE" => "↘",
-                "S" => "↓",
-                "SW" => "↙",
-                "W" => "←",
-                "NW" => "↖",
+                "N" => "⬆️",
+                "NE" => "↗️",
+                "E" => "➡️",
+                "SE" => "↘️",
+                "S" => "⬇️",
+                "SW" => "↙️",
+                "W" => "⬅️",
+                "NW" => "↖️",
                 _ => "?",
             };
             join_set.spawn(async move {
