@@ -1,3 +1,4 @@
+pub(crate) mod advance;
 pub(crate) mod commands;
 pub(crate) mod debug_journal;
 pub(crate) mod format;
@@ -487,7 +488,7 @@ mod tests {
         let mut flight = tracked_flight();
         flight.takeoff_at = Some(dt("2026-04-18T10:30:00Z"));
 
-        let msg = msg_landing(&flight, dt("2026-04-18T12:00:00Z"));
+        let msg = msg_landing(&flight, flight.takeoff_at, dt("2026-04-18T12:00:00Z"));
 
         assert!(msg.contains("Flugzeit: 1h30m"), "got: {msg}");
         assert!(!msg.contains("2h00m"), "got: {msg}");
@@ -497,7 +498,7 @@ mod tests {
     fn landing_reports_unknown_duration_without_takeoff_time() {
         let flight = tracked_flight();
 
-        let msg = msg_landing(&flight, dt("2026-04-18T12:00:00Z"));
+        let msg = msg_landing(&flight, flight.takeoff_at, dt("2026-04-18T12:00:00Z"));
 
         assert!(
             msg.contains("Flugzeit: unbekannt (Takeoff nicht beobachtet)"),

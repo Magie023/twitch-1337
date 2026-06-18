@@ -193,8 +193,12 @@ pub(crate) fn msg_approach(flight: &TrackedFlight) -> String {
     format!("{} ist im Approach", format_flight_prefix(flight))
 }
 
-pub(crate) fn msg_landing(flight: &TrackedFlight, now: DateTime<Utc>) -> String {
-    match flight.takeoff_at {
+pub(crate) fn msg_landing(
+    flight: &TrackedFlight,
+    takeoff_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> String {
+    match takeoff_at {
         Some(takeoff_at) => {
             let duration = now.signed_duration_since(takeoff_at);
             format!(

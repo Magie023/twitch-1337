@@ -13,30 +13,23 @@ use crate::util::clock::Clock;
 use super::{
     CachedFlightInfo, FlightIdentifier, FlightPhase, FlightTrackerState, HexSource,
     TargetConfirmation, TrackedFlight, TrackerCommand, build_flight_view,
-    debug_journal::{
-        AdsbPollDebugInput, DebugHttpOutcome, DiversionDebugInput, FlightTrackerDebugEvent,
-        append_debug_event,
-    },
-    format::{
-        msg_adsb_visible, msg_approach, msg_aviationstack_info, msg_cruise, msg_descent,
-        msg_flight_status, msg_flights_list, msg_landing, msg_pending_expired, msg_possible_divert,
-        msg_squawk_emergency, msg_takeoff, msg_track_started, msg_tracking_lost,
-    },
+    debug_journal::{DebugHttpOutcome, FlightTrackerDebugEvent, append_debug_event},
+    format::{msg_aviationstack_info, msg_flight_status, msg_flights_list, msg_track_started},
     metadata::{
-        add_alias_callsign, apply_aviationstack_metadata, metadata_callsign, normalize_flight_code,
-        seed_flight_aliases, set_hex_if_consistent, set_route_from_iata,
+        add_alias_callsign, aircraft_callsign, apply_aviationstack_metadata, metadata_callsign,
+        normalize_flight_code, seed_flight_aliases, set_hex_if_consistent, set_route_from_iata,
     },
-    phase::{
-        altitude_ft, detect_phase, emergency_squawk_meaning, is_airborne_phase,
-        update_divert_counter, vertical_rate,
-    },
-    schedule::{PollReadiness, is_pending_adsb, poll_readiness},
+    phase::{altitude_ft, detect_phase, vertical_rate},
+    schedule::{PollReadiness, poll_readiness},
     state::save_tracker_state,
 };
 
-use super::{
-    DIVERT_BEARING_THRESHOLD, MAX_FLIGHTS_PER_USER, MAX_TRACKED_FLIGHTS, POLL_TIMEOUT,
-    ROUTE_FETCH_TIMEOUT, TRACKING_LOST_REMOVAL, TRACKING_LOST_THRESHOLD,
+use super::{MAX_FLIGHTS_PER_USER, MAX_TRACKED_FLIGHTS, POLL_TIMEOUT, ROUTE_FETCH_TIMEOUT};
+
+use super::advance::{
+    Emit, Followup, Observation, PollOutcome, RemovalReason, advance_flight, apply_route,
+    candidate_callsign_matches_flight, format_emit, identifier_callsign, last_seen_age_secs,
+    target_confirmation_for_aircraft,
 };
 
 fn find_index_by_identifier(
@@ -112,118 +105,20 @@ pub(crate) fn find_flight_index(flights: &[TrackedFlight], query: &str) -> Optio
     })
 }
 
-pub(crate) fn aircraft_callsign(ac: &NearbyAircraft) -> Option<&str> {
-    ac.flight
-        .as_deref()
-        .map(str::trim)
-        .filter(|callsign| !callsign.is_empty())
-}
-
 #[cfg(test)]
 pub(crate) fn aircraft_matches_tracked_callsign(
     ac: &NearbyAircraft,
     flight: &TrackedFlight,
 ) -> bool {
+    use super::advance::flight_matches_callsign;
+
     matches!(&flight.identifier, FlightIdentifier::Hex(_))
         || aircraft_callsign(ac).is_some_and(|actual| flight_matches_callsign(flight, actual))
-}
-
-fn flight_matches_callsign(flight: &TrackedFlight, actual: &str) -> bool {
-    flight
-        .callsign
-        .as_deref()
-        .is_some_and(|callsign| callsign.eq_ignore_ascii_case(actual))
-        || flight
-            .alias_callsigns
-            .iter()
-            .any(|alias| alias.eq_ignore_ascii_case(actual))
-        || match &flight.identifier {
-            FlightIdentifier::Callsign(identifier_callsign) => {
-                identifier_callsign.eq_ignore_ascii_case(actual)
-            }
-            FlightIdentifier::Hex(_) => false,
-        }
-}
-
-fn candidate_callsign_matches_flight(flight: &TrackedFlight, candidate: &str) -> bool {
-    flight_matches_callsign(flight, candidate)
-        || flight
-            .observed_callsign
-            .as_deref()
-            .is_some_and(|observed| observed.eq_ignore_ascii_case(candidate))
-}
-
-fn identifier_callsign(identifier: &FlightIdentifier) -> Option<&str> {
-    match identifier {
-        FlightIdentifier::Callsign(callsign) => Some(callsign.as_str()),
-        FlightIdentifier::Hex(_) => None,
-    }
 }
 
 fn should_poll_by_hex(flight: &TrackedFlight) -> bool {
     matches!(&flight.identifier, FlightIdentifier::Hex(_))
         || (flight.hex.is_some() && (flight.hex_source.is_some() || flight.last_seen.is_some()))
-}
-
-fn inferred_by_hex_window(flight: &TrackedFlight, now: DateTime<Utc>) -> bool {
-    if matches!(&flight.identifier, FlightIdentifier::Hex(_)) {
-        return true;
-    }
-
-    let Some(scheduled_departure_at) = flight.scheduled_departure_at else {
-        return false;
-    };
-    now >= scheduled_departure_at - TimeDelta::minutes(30)
-        && now <= scheduled_departure_at + TimeDelta::hours(3)
-}
-
-fn tracking_lost_threshold_delta() -> TimeDelta {
-    TimeDelta::from_std(TRACKING_LOST_THRESHOLD).unwrap_or_else(|_| TimeDelta::zero())
-}
-
-fn last_seen_age_secs(flight: &TrackedFlight, now: DateTime<Utc>) -> Option<i64> {
-    flight
-        .last_seen
-        .map(|last_seen| now.signed_duration_since(last_seen).num_seconds().max(0))
-}
-
-fn should_keep_prior_confirmation(
-    flight: &TrackedFlight,
-    confirmation: TargetConfirmation,
-    used_hex: bool,
-    now: DateTime<Utc>,
-) -> bool {
-    used_hex
-        && flight.target_confirmation.is_target_confirmed()
-        && confirmation == TargetConfirmation::AircraftVisible
-        && flight.last_seen.is_some_and(|last_seen| {
-            now.signed_duration_since(last_seen) <= tracking_lost_threshold_delta()
-        })
-}
-
-fn target_confirmation_for_aircraft(
-    flight: &TrackedFlight,
-    ac: &NearbyAircraft,
-    used_hex: bool,
-    now: DateTime<Utc>,
-) -> Option<TargetConfirmation> {
-    if aircraft_callsign(ac).is_some_and(|actual| flight_matches_callsign(flight, actual)) {
-        return Some(TargetConfirmation::ConfirmedByCallsign);
-    }
-
-    if !used_hex {
-        return None;
-    }
-
-    if matches!(&flight.identifier, FlightIdentifier::Hex(_)) || aircraft_callsign(ac).is_none() {
-        if inferred_by_hex_window(flight, now) {
-            Some(TargetConfirmation::InferredByAssignedHex)
-        } else {
-            Some(TargetConfirmation::AircraftVisible)
-        }
-    } else {
-        Some(TargetConfirmation::AircraftVisible)
-    }
 }
 
 fn should_skip_adsb_for_strict_chill(flight: &TrackedFlight, now: DateTime<Utc>) -> bool {
@@ -1253,7 +1148,7 @@ where
                     FlightTrackerDebugEvent::tracking_removal(flight, "pending_expired", None),
                 )
                 .await;
-                messages.push(msg_pending_expired(flight));
+                messages.push(format_emit(flight, &Emit::PendingExpired, now));
                 removals.push(flight.identifier.clone());
                 changed = true;
                 continue;
@@ -1324,11 +1219,6 @@ where
         }
     }
 
-    let removal_threshold =
-        chrono::TimeDelta::from_std(TRACKING_LOST_REMOVAL).unwrap_or(chrono::TimeDelta::zero());
-    let lost_threshold =
-        chrono::TimeDelta::from_std(TRACKING_LOST_THRESHOLD).unwrap_or(chrono::TimeDelta::zero());
-
     for (identifier, used_hex, ac_result) in fetch_results {
         drain_latency_sensitive_commands(
             &mut cmd_rx,
@@ -1342,399 +1232,119 @@ where
         let Some(idx) = find_index_by_identifier(&state.flights, &identifier) else {
             continue;
         };
-        let flight = &mut state.flights[idx];
-        let was_pending = is_pending_adsb(flight);
-        let was_target_confirmed = flight.target_confirmation.is_target_confirmed();
-        flight.last_adsb_poll_at = Some(now);
-        changed = true;
 
-        let ac = match ac_result {
-            Ok(Ok(Some(ac))) => ac,
-            Ok(Ok(None)) => {
-                append_debug_event(
-                    data_dir,
-                    now,
-                    FlightTrackerDebugEvent::adsb_poll_result(
-                        flight,
-                        AdsbPollDebugInput {
-                            lookup_mode: if used_hex { "hex" } else { "callsign" },
-                            outcome: "miss",
-                            aircraft: None,
-                            direct_target_confirmed: None,
-                            sticky_confirmation: None,
-                            phase_sample_eligible: None,
-                            last_seen_age_secs: last_seen_age_secs(flight, now),
-                        },
-                    ),
-                )
-                .await;
-                // Removal keys off `last_visible_at` (last poll the assigned
-                // aircraft was on ADS-B), NOT `last_seen` (last target-confirmed
-                // sighting). A flight stuck in AircraftVisible freezes
-                // `last_seen` while its hex keeps showing up, so using it here
-                // would collapse the grace window on the first empty poll. A
-                // flight whose hex stays visible indefinitely is intentionally
-                // kept (trust-the-hex; the wrong-plane case is an inherent
-                // tradeoff and never reaches this branch).
-                if flight.last_visible_at.is_none() {
-                    flight.polls_since_change = flight.polls_since_change.saturating_add(1);
-                } else if let Some(last_visible_at) = flight.last_visible_at {
-                    let lost_duration = now.signed_duration_since(last_visible_at);
-                    if lost_duration >= removal_threshold {
-                        info!(
-                            identifier = %flight.identifier,
-                            "Removing flight: tracking lost for {}s",
-                            lost_duration.num_seconds()
-                        );
-                        append_debug_event(
-                            data_dir,
-                            now,
-                            FlightTrackerDebugEvent::tracking_removal(
-                                flight,
-                                "tracking_lost",
-                                Some(lost_duration.num_seconds()),
-                            ),
-                        )
-                        .await;
-                        messages.push(msg_tracking_lost(flight));
-                        removals.push(flight.identifier.clone());
-                    } else if lost_duration >= lost_threshold {
-                        debug!(
-                            identifier = %flight.identifier,
-                            last_seen_secs_ago = lost_duration.num_seconds(),
-                            "Flight not visible via ADS-B"
-                        );
-                    }
-                }
-                continue;
-            }
+        let outcome = match ac_result {
+            Ok(Ok(Some(ac))) => PollOutcome::Hit(Box::new(ac)),
+            Ok(Ok(None)) => PollOutcome::Miss,
             Ok(Err(e)) => {
-                warn!(error = ?e, identifier = %flight.identifier, "ADS-B poll failed");
-                append_debug_event(
-                    data_dir,
-                    now,
-                    FlightTrackerDebugEvent::adsb_poll_result(
-                        flight,
-                        AdsbPollDebugInput {
-                            lookup_mode: if used_hex { "hex" } else { "callsign" },
-                            outcome: "error",
-                            aircraft: None,
-                            direct_target_confirmed: None,
-                            sticky_confirmation: None,
-                            phase_sample_eligible: None,
-                            last_seen_age_secs: last_seen_age_secs(flight, now),
-                        },
-                    ),
-                )
-                .await;
-                continue;
+                warn!(error = ?e, identifier = %identifier, "ADS-B poll failed");
+                PollOutcome::Error
             }
             Err(_) => {
-                warn!(identifier = %flight.identifier, "ADS-B poll timed out");
-                append_debug_event(
-                    data_dir,
-                    now,
-                    FlightTrackerDebugEvent::adsb_poll_result(
-                        flight,
-                        AdsbPollDebugInput {
-                            lookup_mode: if used_hex { "hex" } else { "callsign" },
-                            outcome: "timeout",
-                            aircraft: None,
-                            direct_target_confirmed: None,
-                            sticky_confirmation: None,
-                            phase_sample_eligible: None,
-                            last_seen_age_secs: last_seen_age_secs(flight, now),
-                        },
-                    ),
-                )
-                .await;
-                continue;
+                warn!(identifier = %identifier, "ADS-B poll timed out");
+                PollOutcome::Timeout
             }
         };
+        let obs = Observation { used_hex, outcome };
 
-        let Some(raw_confirmation) = target_confirmation_for_aircraft(flight, &ac, used_hex, now)
-        else {
-            debug!(
-                identifier = %flight.identifier,
-                aircraft_callsign = aircraft_callsign(&ac).unwrap_or("<missing>"),
-                "Ignoring ADS-B aircraft that does not confirm target"
-            );
-            continue;
+        let update = {
+            let flight = &mut state.flights[idx];
+            advance_flight(flight, &obs, now)
         };
+        changed = true;
 
-        // The assigned aircraft is visible on ADS-B (any confirmation kind:
-        // ConfirmedByCallsign / InferredByAssignedHex / AircraftVisible). This
-        // anchors the tracking-lost removal timer, separate from `last_seen`,
-        // which only moves on direct target confirmation below.
-        flight.last_visible_at = Some(now);
-
-        let direct_target_confirmed = raw_confirmation.is_target_confirmed();
-        let sticky_confirmation =
-            should_keep_prior_confirmation(flight, raw_confirmation, used_hex, now);
-        let confirmation = if sticky_confirmation {
-            flight.target_confirmation
-        } else {
-            raw_confirmation
-        };
-        let phase_sample_confirmed =
-            direct_target_confirmed || (sticky_confirmation && aircraft_callsign(&ac).is_none());
-        let became_target_confirmed = !was_target_confirmed && direct_target_confirmed;
-        append_debug_event(
-            data_dir,
-            now,
-            FlightTrackerDebugEvent::adsb_poll_result(
-                flight,
-                AdsbPollDebugInput {
-                    lookup_mode: if used_hex { "hex" } else { "callsign" },
-                    outcome: "hit",
-                    aircraft: Some(&ac),
-                    direct_target_confirmed: Some(direct_target_confirmed),
-                    sticky_confirmation: Some(sticky_confirmation),
-                    phase_sample_eligible: Some(phase_sample_confirmed),
-                    last_seen_age_secs: last_seen_age_secs(flight, now),
-                },
-            ),
-        )
-        .await;
-
-        if direct_target_confirmed {
-            flight.last_seen = Some(now);
-        }
-        flight.target_confirmation = confirmation;
-        flight.observed_callsign = aircraft_callsign(&ac).map(std::string::ToString::to_string);
-
-        if (confirmation == TargetConfirmation::ConfirmedByCallsign
-            || matches!(&flight.identifier, FlightIdentifier::Hex(_)))
-            && flight.callsign.is_none()
-            && let Some(cs) = flight.observed_callsign.clone()
-        {
-            debug!(identifier = %flight.identifier, callsign = %cs, "Resolved callsign");
-            flight.callsign = Some(cs.clone());
-            add_alias_callsign(flight, &cs);
-            changed = true;
-
-            if flight.route.is_none() {
-                match tokio::time::timeout(
-                    ROUTE_FETCH_TIMEOUT,
-                    aviation_client.get_flight_route(&cs),
-                )
-                .await
-                {
-                    Ok(Ok(Some(route))) => {
-                        let origin = route.origin.iata_code.clone();
-                        let dest = route.destination.iata_code.clone();
-                        set_route_from_iata(flight, &origin, &dest);
-                        append_debug_event(
-                            data_dir,
-                            now,
-                            FlightTrackerDebugEvent::flight_route_lookup(
-                                flight.identifier.as_str(),
-                                Some(&cs),
-                                DebugHttpOutcome::success("adsbdb", "flight_route"),
-                                Some(&origin),
-                                Some(&dest),
-                                flight.dest_lat.is_some() && flight.dest_lon.is_some(),
-                            ),
-                        )
-                        .await;
-                    }
-                    Ok(Ok(None)) => {
-                        append_debug_event(
-                            data_dir,
-                            now,
-                            FlightTrackerDebugEvent::flight_route_lookup(
-                                flight.identifier.as_str(),
-                                Some(&cs),
-                                DebugHttpOutcome::miss("adsbdb", "flight_route"),
-                                None,
-                                None,
-                                false,
-                            ),
-                        )
-                        .await;
-                    }
-                    Ok(Err(_)) => {
-                        append_debug_event(
-                            data_dir,
-                            now,
-                            FlightTrackerDebugEvent::flight_route_lookup(
-                                flight.identifier.as_str(),
-                                Some(&cs),
-                                DebugHttpOutcome::error("adsbdb", "flight_route"),
-                                None,
-                                None,
-                                false,
-                            ),
-                        )
-                        .await;
-                    }
-                    Err(_) => {
-                        append_debug_event(
-                            data_dir,
-                            now,
-                            FlightTrackerDebugEvent::flight_route_lookup(
-                                flight.identifier.as_str(),
-                                Some(&cs),
-                                DebugHttpOutcome::timeout("adsbdb", "flight_route"),
-                                None,
-                                None,
-                                false,
-                            ),
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
-        if let Some(hex) = ac.hex.as_deref()
-            && set_hex_if_consistent(flight, hex, HexSource::Adsb, direct_target_confirmed)
-        {
-            debug!(identifier = %flight.identifier, hex = %hex, "Resolved hex");
-        }
-        if flight.aircraft_type.is_none()
-            && let Some(t) = &ac.t
-        {
-            flight.aircraft_type = Some(t.clone());
+        for event in update.debug {
+            append_debug_event(data_dir, now, event).await;
         }
 
-        if let Some(new_squawk) = &ac.squawk {
-            let squawk_changed = flight.squawk.as_ref() != Some(new_squawk);
-            if phase_sample_confirmed
-                && squawk_changed
-                && let Some(meaning) = emergency_squawk_meaning(new_squawk)
+        for followup in update.followups {
+            let Followup::FetchRoute { callsign } = followup;
+            match tokio::time::timeout(
+                ROUTE_FETCH_TIMEOUT,
+                aviation_client.get_flight_route(&callsign),
+            )
+            .await
             {
-                messages.push(msg_squawk_emergency(flight, new_squawk, meaning));
+                Ok(Ok(Some(route))) => {
+                    let origin = route.origin.iata_code.clone();
+                    let dest = route.destination.iata_code.clone();
+                    let flight = &mut state.flights[idx];
+                    apply_route(flight, &origin, &dest);
+                    append_debug_event(
+                        data_dir,
+                        now,
+                        FlightTrackerDebugEvent::flight_route_lookup(
+                            state.flights[idx].identifier.as_str(),
+                            Some(&callsign),
+                            DebugHttpOutcome::success("adsbdb", "flight_route"),
+                            Some(&origin),
+                            Some(&dest),
+                            state.flights[idx].dest_lat.is_some()
+                                && state.flights[idx].dest_lon.is_some(),
+                        ),
+                    )
+                    .await;
+                }
+                Ok(Ok(None)) => {
+                    append_debug_event(
+                        data_dir,
+                        now,
+                        FlightTrackerDebugEvent::flight_route_lookup(
+                            state.flights[idx].identifier.as_str(),
+                            Some(&callsign),
+                            DebugHttpOutcome::miss("adsbdb", "flight_route"),
+                            None,
+                            None,
+                            false,
+                        ),
+                    )
+                    .await;
+                }
+                Ok(Err(_)) => {
+                    append_debug_event(
+                        data_dir,
+                        now,
+                        FlightTrackerDebugEvent::flight_route_lookup(
+                            state.flights[idx].identifier.as_str(),
+                            Some(&callsign),
+                            DebugHttpOutcome::error("adsbdb", "flight_route"),
+                            None,
+                            None,
+                            false,
+                        ),
+                    )
+                    .await;
+                }
+                Err(_) => {
+                    append_debug_event(
+                        data_dir,
+                        now,
+                        FlightTrackerDebugEvent::flight_route_lookup(
+                            state.flights[idx].identifier.as_str(),
+                            Some(&callsign),
+                            DebugHttpOutcome::timeout("adsbdb", "flight_route"),
+                            None,
+                            None,
+                            false,
+                        ),
+                    )
+                    .await;
+                }
             }
         }
 
-        let prev_lat = flight.lat;
-        let prev_lon = flight.lon;
-
-        flight.altitude_ft = altitude_ft(&ac);
-        flight.vertical_rate_fpm = vertical_rate(&ac);
-        flight.ground_speed_kts = ac.gs;
-        flight.lat = ac.lat;
-        flight.lon = ac.lon;
-        flight.squawk = ac.squawk.clone();
-
-        if became_target_confirmed {
-            messages.push(msg_adsb_visible(flight));
-            if was_pending {
-                flight.phase = FlightPhase::Unknown;
-                flight.last_phase_change = None;
-                flight.polls_since_change = 0;
-            }
+        for emit in &update.emits {
+            let msg = format_emit(&state.flights[idx], emit, now);
+            messages.push(msg);
         }
 
-        if phase_sample_confirmed {
-            let new_phase = detect_phase(flight, &ac);
-            let old_phase = flight.phase;
-
-            if new_phase != old_phase {
-                flight.phase = new_phase;
-                flight.last_phase_change = Some(now);
-                flight.polls_since_change = 0;
-                changed = true;
-
-                if old_phase == FlightPhase::Ground
-                    && is_airborne_phase(new_phase)
-                    && flight.takeoff_at.is_none()
-                {
-                    flight.takeoff_at = Some(now);
-                }
-
-                match new_phase {
-                    FlightPhase::Takeoff => messages.push(msg_takeoff(flight)),
-                    FlightPhase::Cruise => messages.push(msg_cruise(flight)),
-                    FlightPhase::Descent => messages.push(msg_descent(flight)),
-                    FlightPhase::Approach => messages.push(msg_approach(flight)),
-                    FlightPhase::Landing => messages.push(msg_landing(flight, now)),
-                    _ => {}
-                }
-
-                if new_phase == FlightPhase::Landing {
-                    flight.phase = FlightPhase::Ground;
-                    flight.takeoff_at = None;
-                }
-                append_debug_event(
-                    data_dir,
-                    now,
-                    FlightTrackerDebugEvent::phase_transition(
-                        flight,
-                        &format!("{old_phase:?}"),
-                        &format!("{new_phase:?}"),
-                        new_phase == FlightPhase::Landing,
-                    ),
-                )
-                .await;
-            } else {
-                flight.polls_since_change += 1;
-            }
-        }
-
-        if phase_sample_confirmed
-            && matches!(flight.phase, FlightPhase::Descent | FlightPhase::Approach)
-        {
-            if let (
-                Some(dest_lat),
-                Some(dest_lon),
-                Some(cur_lat),
-                Some(cur_lon),
-                Some(p_lat),
-                Some(p_lon),
-            ) = (
-                flight.dest_lat,
-                flight.dest_lon,
-                flight.lat,
-                flight.lon,
-                prev_lat,
-                prev_lon,
-            ) {
-                let ground_track =
-                    random_flight::geo::initial_bearing(p_lat, p_lon, cur_lat, cur_lon);
-                let bearing_to_dest =
-                    random_flight::geo::initial_bearing(cur_lat, cur_lon, dest_lat, dest_lon);
-
-                let mut diff = (ground_track - bearing_to_dest).abs();
-                if diff > 180.0 {
-                    diff = 360.0 - diff;
-                }
-
-                let counter_before = flight.divert_consecutive_polls;
-                let alert_emitted = update_divert_counter(
-                    &mut flight.divert_consecutive_polls,
-                    diff > DIVERT_BEARING_THRESHOLD,
-                );
-                append_debug_event(
-                    data_dir,
-                    now,
-                    FlightTrackerDebugEvent::diversion_decision(
-                        flight,
-                        DiversionDebugInput {
-                            previous_lat: p_lat,
-                            previous_lon: p_lon,
-                            current_lat: cur_lat,
-                            current_lon: cur_lon,
-                            destination_lat: dest_lat,
-                            destination_lon: dest_lon,
-                            ground_track,
-                            bearing_to_dest,
-                            diff,
-                            threshold: DIVERT_BEARING_THRESHOLD,
-                            anomalous: diff > DIVERT_BEARING_THRESHOLD,
-                            counter_before,
-                            counter_after: flight.divert_consecutive_polls,
-                            alert_emitted,
-                        },
-                    ),
-                )
-                .await;
-                if alert_emitted {
-                    messages.push(msg_possible_divert(flight));
+        if let Some(reason) = update.removal {
+            match reason {
+                RemovalReason::TrackingLost { secs } => {
+                    info!(identifier = %identifier, "Removing flight: tracking lost for {secs}s");
                 }
             }
-        } else {
-            flight.divert_consecutive_polls = 0;
+            removals.push(identifier.clone());
         }
     }
 

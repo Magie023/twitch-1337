@@ -1,6 +1,13 @@
-use crate::aviation::{AviationstackFlightMetadata, iata_to_coords};
+use crate::aviation::{AviationstackFlightMetadata, NearbyAircraft, iata_to_coords};
 
 use super::{FlightIdentifier, HexSource, TrackedFlight};
+
+pub(crate) fn aircraft_callsign(ac: &NearbyAircraft) -> Option<&str> {
+    ac.flight
+        .as_deref()
+        .map(str::trim)
+        .filter(|callsign| !callsign.is_empty())
+}
 
 pub(crate) fn set_route_from_iata(flight: &mut TrackedFlight, origin: &str, dest: &str) {
     let origin = origin.trim().to_uppercase();
