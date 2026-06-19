@@ -1742,6 +1742,8 @@ async fn tracker_answers_dashboard_commands_while_polling() {
     let (delete_tx, delete_rx) = tokio::sync::oneshot::channel();
     tx.send(TrackerCommand::DeleteFromWeb {
         identifier: "DLH1234".to_string(),
+        requested_by: "tester".to_string(),
+        is_mod: true,
         reply: delete_tx,
     })
     .await

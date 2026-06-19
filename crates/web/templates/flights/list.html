@@ -9,46 +9,54 @@
   </div>
 </div>
 
+{% if aviation_disabled %}
+  <div class="empty">Aviation tracking is disabled.</div>
+{% else if tracker_busy %}
+  <div class="empty degraded">Flight tracker snapshot timed out. The tracker may still be running; refresh to retry.</div>
+{% else if flights.is_empty() %}
+  <div class="empty">No flights are being tracked right now.</div>
+{% else %}
 <div class="table flights{% if is_mod %} with-act{% endif %}">
   <div class="thead">
-    <div class="th col-id">ID</div>
+    <div class="th col-id">Identifier</div>
     <div class="th col-cs">Callsign</div>
+    <div class="th col-hex">Hex</div>
     <div class="th col-by">Owner</div>
     <div class="th col-phase">Phase</div>
+    <div class="th col-route">Route</div>
     <div class="th col-alt">Altitude</div>
-    <div class="th col-gs">Speed</div>
-    <div class="th col-age">Seen</div>
+    <div class="th col-gs">Ground Speed</div>
+    <div class="th col-age">Last Seen</div>
+    <div class="th col-confirm">Confirmation</div>
+    <div class="th col-source">Hex Source</div>
     {% if is_mod %}<div class="th col-act"></div>{% endif %}
   </div>
-  {% if aviation_disabled %}
-    <div class="empty">Aviation tracking is disabled.</div>
-  {% else if tracker_busy %}
-    <div class="empty">Flight tracker busy — refresh to retry.</div>
-  {% else if flights.is_empty() %}
-    <div class="empty">No flights tracked right now.</div>
-  {% else %}
-    <div class="tbody">
-    {% for f in flights %}
-      <div class="tr">
-        <div class="td col-id mono">{{ f.identifier }}</div>
-        <div class="td col-cs mono">{% match f.callsign %}{% when Some(v) %}{{ v }}{% when None %}—{% endmatch %}</div>
-        <div class="td col-by mono">{{ f.owner_login }}</div>
-        <div class="td col-phase mono">{{ f.phase }}</div>
-        <div class="td col-alt mono num">{% match f.altitude_ft %}{% when Some(v) %}{{ v }} ft{% when None %}—{% endmatch %}</div>
-        <div class="td col-gs mono num">{% match f.ground_speed_kts %}{% when Some(v) %}{{ v }} kt{% when None %}—{% endmatch %}</div>
-        <div class="td col-age mono num">{% match f.last_seen_secs_ago %}{% when Some(v) %}{{ v }}s{% when None %}—{% endmatch %}</div>
-        {% if is_mod %}
-        <div class="td col-act">
-          <form method="post" action="/flights/delete" style="display:inline" onsubmit="return confirm('Untrack {{ f.identifier }}?')">
-            <input type="hidden" name="_csrf" value="{{ csrf }}">
-            <input type="hidden" name="identifier" value="{{ f.identifier }}">
-            <button type="submit" class="row-act danger" title="Untrack">✕</button>
-          </form>
-        </div>
-        {% endif %}
+  <div class="tbody">
+  {% for f in flights %}
+    <div class="tr">
+      <div class="td col-id mono">{{ f.identifier }}</div>
+      <div class="td col-cs mono">{% match f.callsign %}{% when Some(v) %}{{ v }}{% when None %}—{% endmatch %}</div>
+      <div class="td col-hex mono">{% match f.hex %}{% when Some(v) %}{{ v }}{% when None %}—{% endmatch %}</div>
+      <div class="td col-by mono">{{ f.owner_login }}</div>
+      <div class="td col-phase mono">{{ f.phase }}</div>
+      <div class="td col-route mono">{% match f.route %}{% when Some(v) %}{{ v }}{% when None %}—{% endmatch %}</div>
+      <div class="td col-alt mono num">{% match f.altitude_ft %}{% when Some(v) %}{{ v }} ft{% when None %}—{% endmatch %}</div>
+      <div class="td col-gs mono num">{% match f.ground_speed_kts %}{% when Some(v) %}{{ v }} kt{% when None %}—{% endmatch %}</div>
+      <div class="td col-age mono num">{% match f.last_seen_secs_ago %}{% when Some(v) %}{{ v }}s ago{% when None %}—{% endmatch %}</div>
+      <div class="td col-confirm mono">{{ f.target_confirmation }}</div>
+      <div class="td col-source mono">{% match f.hex_source %}{% when Some(v) %}{{ v }}{% when None %}—{% endmatch %}</div>
+      {% if is_mod %}
+      <div class="td col-act">
+        <form method="post" action="/flights/delete" style="display:inline" onsubmit="return confirm('Untrack {{ f.identifier }}?')">
+          <input type="hidden" name="_csrf" value="{{ csrf }}">
+          <input type="hidden" name="identifier" value="{{ f.identifier }}">
+          <button type="submit" class="row-act danger" title="Untrack">✕</button>
+        </form>
       </div>
-    {% endfor %}
+      {% endif %}
     </div>
-  {% endif %}
+  {% endfor %}
+  </div>
 </div>
+{% endif %}
 {% endblock %}
