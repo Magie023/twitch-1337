@@ -152,6 +152,9 @@ pub(super) fn merge_into(into: &mut SettingsOverrides, patch: &SettingsOverrides
     if let Some(v) = patch.ai.emotes.min_baseline_emotes {
         into.ai.emotes.min_baseline_emotes = Some(v);
     }
+    if patch.ai.emotes.pinned_emotes.is_some() {
+        into.ai.emotes.pinned_emotes = patch.ai.emotes.pinned_emotes.clone();
+    }
     if patch.ai.emotes.base_url.is_some() {
         into.ai.emotes.base_url = patch.ai.emotes.base_url.clone();
     }

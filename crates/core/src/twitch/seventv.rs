@@ -15,6 +15,11 @@ use crate::{APP_USER_AGENT, settings::SettingsHandle, settings::ai::AiEmotes};
 const DEFAULT_BASE_URL: &str = "https://7tv.io/v3";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Max emotes returned by the on-demand `search_emotes` tool. Independent of
+/// the per-turn `max_prompt_emotes` window — the tool exists to reach the full
+/// catalog without bloating every prompt.
+pub const SEARCH_EMOTES_LIMIT: usize = 20;
+
 /// Manual glossary baked into the binary at build time. Curated alongside the
 /// rest of the codebase; updates ship with the binary, not as a runtime file.
 pub const BAKED_GLOSSARY_TOML: &str = include_str!("../../data/7tv_emotes.toml");
@@ -36,6 +41,7 @@ struct EmotesLiveCaps {
     refresh_interval: Duration,
     max_prompt_emotes: usize,
     min_baseline_emotes: usize,
+    pinned_emotes: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -98,6 +104,7 @@ fn live_caps_from_handle(settings: &SettingsHandle) -> EmotesLiveCaps {
             refresh_interval: Duration::from_secs(cfg.refresh_interval_secs),
             max_prompt_emotes: cfg.max_prompt_emotes,
             min_baseline_emotes: cfg.min_baseline_emotes.min(cfg.max_prompt_emotes),
+            pinned_emotes: cfg.pinned_emotes.clone(),
         }
     } else {
         let fallback = AiEmotes::default();
@@ -106,6 +113,7 @@ fn live_caps_from_handle(settings: &SettingsHandle) -> EmotesLiveCaps {
             refresh_interval: Duration::from_secs(fallback.refresh_interval_secs),
             max_prompt_emotes: fallback.max_prompt_emotes,
             min_baseline_emotes: fallback.min_baseline_emotes.min(fallback.max_prompt_emotes),
+            pinned_emotes: fallback.pinned_emotes,
         }
     }
 }
@@ -144,6 +152,21 @@ impl SevenTvEmoteProvider {
             .trim_end_matches('/')
             .to_string();
 
+        // Drop-with-warning: pins absent from the baked glossary can never
+        // appear in the prompt block (they're not catalog-backed entries), so
+        // surface them once at startup. Pins that ARE in the glossary but not
+        // in the live channel/global catalog this turn are handled silently at
+        // selection time — that's an expected, dynamic condition. The pinned
+        // set is live-rebindable, so a typo added later via the dashboard is
+        // caught on the next restart.
+        let missing = pins_missing_from_glossary(&cfg.pinned_emotes, &glossary.emotes);
+        if !missing.is_empty() {
+            warn!(
+                missing = ?missing,
+                "pinned 7TV emotes absent from the glossary; they will never appear in the prompt block"
+            );
+        }
+
         Ok(Self {
             settings,
             http,
@@ -179,9 +202,24 @@ impl SevenTvEmoteProvider {
             &emotes,
             caps.max_prompt_emotes,
             caps.min_baseline_emotes,
+            &caps.pinned_emotes,
             instruction,
             recent_chat,
         )
+    }
+
+    /// Rank the full available emote set against a free-text query for the
+    /// on-demand `search_emotes` tool. Returns a chat-tool result string: up to
+    /// [`SEARCH_EMOTES_LIMIT`] matches in the prompt-line format, or a graceful
+    /// note when nothing matches / the catalog is unavailable. Unlike the
+    /// per-turn block this ignores `max_prompt_emotes` and does not dedupe
+    /// against the current turn's window.
+    pub async fn search_emotes(&self, twitch_channel_id: &str, query: &str) -> String {
+        let caps = self.live_caps();
+        match self.prompt_emotes(twitch_channel_id, &caps).await {
+            Some(emotes) => build_search_block(&emotes, query, SEARCH_EMOTES_LIMIT),
+            None => "Emote catalog is unavailable right now; use only the emote codes already listed in the system prompt.".to_string(),
+        }
     }
 
     async fn prompt_emotes(
@@ -390,6 +428,7 @@ fn build_prompt_block(
     emotes: &[PromptEmote],
     max_prompt_emotes: usize,
     min_baseline_emotes: usize,
+    pinned_emotes: &[String],
     instruction: &str,
     recent_chat: &str,
 ) -> Option<String> {
@@ -397,6 +436,7 @@ fn build_prompt_block(
         emotes,
         max_prompt_emotes,
         min_baseline_emotes,
+        pinned_emotes,
         instruction,
         recent_chat,
     )
@@ -408,28 +448,55 @@ fn build_prompt_block(
         return None;
     }
 
+    // The "do not invent" rule is reconciled with the search_emotes tool: the
+    // tool is registered whenever this block is present, so the model is told
+    // it may reach for codes beyond the window via the tool — never fabricate.
     Some(format!(
-        "\n\n7TV emotes available in this channel:\nUse only these exact emote codes. In normal casual Twitch-chat replies, include exactly one fitting emote by default. Use zero emotes only for extremely serious, administrative, fact-sensitive, or clearly unsuitable topics. Use two emotes only when the chat moment is obviously hype, chaotic, or spammy. Prefer emotes recently used by chat when they fit. Do not invent or explain emotes.\n{}",
+        "\n\n7TV emotes available in this channel:\nIn normal casual Twitch-chat replies, include exactly one fitting emote by default. Use zero emotes only for extremely serious, administrative, fact-sensitive, or clearly unsuitable topics. Use two emotes only when the chat moment is obviously hype, chaotic, or spammy. Prefer emotes recently used by chat when they fit. Use only the exact emote codes listed below or returned by the search_emotes tool; if you want an emote for a feeling that is not shown, call search_emotes to find one. Never invent or alter emote codes.\n{}",
         lines.join("\n")
     ))
 }
 
-/// Pick which emotes to inject this turn. Scoring emotes (anything seen in
-/// recent chat, or whose meaning/usage shares 4+ char terms with the current
-/// instruction) come first, capped by `max_prompt_emotes`. If fewer than
-/// `min_baseline_emotes` made the cut, fill the gap with glossary-order
-/// fallbacks so the model always has a baseline vocabulary. The whole list
-/// stays capped by `max_prompt_emotes`.
+/// Pick which emotes to inject this turn, in three deduped layers capped by
+/// `max_prompt_emotes`:
+/// 1. **Pinned core** — `pinned_emotes`, in list order, for the persona's
+///    reflex emotes; only those present in the available set are injected
+///    (absent pins are dropped). This guarantees soul-reflex emotes are always
+///    in-window when they exist in the catalog.
+/// 2. **Scored** — anything seen in recent chat, or whose meaning/usage shares
+///    4+ char terms with the current instruction.
+/// 3. **Baseline fill** — glossary-order fallbacks, until at least
+///    `min_baseline_emotes` total are present, so the model always has a
+///    baseline vocabulary.
+///
+/// No emote appears in more than one layer (deduped by glossary index).
 fn select_prompt_emotes<'a>(
     emotes: &'a [PromptEmote],
     max_prompt_emotes: usize,
     min_baseline_emotes: usize,
+    pinned_emotes: &[String],
     instruction: &str,
     recent_chat: &str,
 ) -> Vec<&'a PromptEmote> {
     if max_prompt_emotes == 0 {
         return Vec::new();
     }
+    let mut picked: Vec<&PromptEmote> = Vec::with_capacity(max_prompt_emotes);
+    let mut picked_indexes: HashSet<usize> = HashSet::new();
+
+    // Layer 1: pinned core.
+    for name in pinned_emotes {
+        if picked.len() >= max_prompt_emotes {
+            break;
+        }
+        if let Some((index, emote)) = emotes.iter().enumerate().find(|(_, e)| e.name == *name)
+            && picked_indexes.insert(index)
+        {
+            picked.push(emote);
+        }
+    }
+
+    // Layer 2: scored.
     let context_terms = searchable_terms(instruction);
     let scored: Vec<(usize, usize, usize, &PromptEmote)> = emotes
         .iter()
@@ -451,13 +518,17 @@ fn select_prompt_emotes<'a>(
             .then_with(|| a.0.cmp(&b.0))
     });
 
-    let baseline_floor = min_baseline_emotes.min(max_prompt_emotes);
-    let mut picked: Vec<&PromptEmote> = Vec::with_capacity(max_prompt_emotes);
-    let mut picked_indexes: HashSet<usize> = HashSet::new();
-    for entry in scoring.iter().take(max_prompt_emotes) {
-        picked.push(entry.3);
-        picked_indexes.insert(entry.0);
+    for entry in &scoring {
+        if picked.len() >= max_prompt_emotes {
+            break;
+        }
+        if picked_indexes.insert(entry.0) {
+            picked.push(entry.3);
+        }
     }
+
+    // Layer 3: baseline fill.
+    let baseline_floor = min_baseline_emotes.min(max_prompt_emotes);
     if picked.len() < baseline_floor {
         for (index, _, _, emote) in &scored {
             if picked.len() >= baseline_floor {
@@ -469,6 +540,85 @@ fn select_prompt_emotes<'a>(
         }
     }
     picked
+}
+
+/// Pinned names absent from the glossary — these can never be catalog-backed,
+/// so they are reported once at startup and skipped at selection time.
+fn pins_missing_from_glossary(pinned: &[String], glossary: &[GlossaryEmote]) -> Vec<String> {
+    let names: HashSet<&str> = glossary.iter().map(|g| g.name.trim()).collect();
+    pinned
+        .iter()
+        .filter(|p| !names.contains(p.trim()))
+        .cloned()
+        .collect()
+}
+
+/// Render the `search_emotes` tool result: up to `limit` ranked matches in the
+/// prompt-line format, or a graceful note when nothing matches.
+fn build_search_block(emotes: &[PromptEmote], query: &str, limit: usize) -> String {
+    let matches = select_search_emotes(emotes, query, limit);
+    if matches.is_empty() {
+        return format!(
+            "No emotes matched {query:?}. Use only the emote codes already listed in the system prompt; do not invent codes."
+        );
+    }
+    let lines = matches
+        .into_iter()
+        .map(format_prompt_emote_line)
+        .collect::<Vec<_>>();
+    format!(
+        "7TV emotes matching {query:?} ({} shown). Use the exact codes:\n{}",
+        lines.len(),
+        lines.join("\n")
+    )
+}
+
+/// Rank the full available set against a free-text query, returning the top
+/// `limit` matches. Reuses the prompt-block term scorer (`searchable_terms` +
+/// `terms_match`) over name + meaning + usage, plus a strong bonus for a
+/// case-insensitive partial name match so the model can look an emote up by
+/// code. Zero-score entries are dropped (graceful empty when nothing matches).
+fn select_search_emotes<'a>(
+    emotes: &'a [PromptEmote],
+    query: &str,
+    limit: usize,
+) -> Vec<&'a PromptEmote> {
+    let terms = searchable_terms(query);
+    let query_lc = query.trim().to_lowercase();
+    let mut scored: Vec<(usize, usize, &PromptEmote)> = emotes
+        .iter()
+        .enumerate()
+        .map(|(index, emote)| (search_match_score(emote, &terms, &query_lc), index, emote))
+        .filter(|(score, _, _)| *score > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, emote)| emote)
+        .collect()
+}
+
+fn search_match_score(emote: &PromptEmote, query_terms: &[String], query_lc: &str) -> usize {
+    let mut score = 0;
+    if query_lc.len() >= 2 && emote.name.to_lowercase().contains(query_lc) {
+        score += 10;
+    }
+    if !query_terms.is_empty() {
+        let mut fields = emote.name.clone();
+        fields.push(' ');
+        fields.push_str(&emote.meaning);
+        if let Some(usage) = emote.usage.as_deref() {
+            fields.push(' ');
+            fields.push_str(usage);
+        }
+        let emote_terms = searchable_terms(&fields);
+        score += query_terms
+            .iter()
+            .filter(|query| emote_terms.iter().any(|term| terms_match(query, term)))
+            .count();
+    }
+    score
 }
 
 fn format_prompt_emote_line(emote: &PromptEmote) -> String {
@@ -636,7 +786,7 @@ mod tests {
         );
 
         let emotes = build_available_prompt_emotes(&glossary, &available).unwrap();
-        let prompt = build_prompt_block(&emotes, 40, 40, "", "").unwrap();
+        let prompt = build_prompt_block(&emotes, 40, 40, &[], "", "").unwrap();
 
         assert!(prompt.contains("KEKW"));
         assert!(prompt.contains("meaning=lachen"));
@@ -724,7 +874,7 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             let emotes = build_available_prompt_emotes(&glossary, &available).unwrap();
-            let prompt = build_prompt_block(&emotes, 40, 40, "", "").unwrap();
+            let prompt = build_prompt_block(&emotes, 40, 40, &[], "", "").unwrap();
             assert!(prompt.contains("KEKW"));
             assert!(!prompt.contains("MissingA"));
             assert!(!prompt.contains("MissingB"));
@@ -778,7 +928,7 @@ mod tests {
         );
 
         let emotes = build_available_prompt_emotes(&glossary, &available).unwrap();
-        let prompt = build_prompt_block(&emotes, 1, 1, "", "").unwrap();
+        let prompt = build_prompt_block(&emotes, 1, 1, &[], "", "").unwrap();
 
         assert!(prompt.contains("A"));
         assert!(!prompt.contains("B"));
@@ -817,6 +967,7 @@ mod tests {
             &emotes,
             2,
             2,
+            &[],
             "sag etwas lustiges",
             "## Recent chat (#main)\n[13:37] bob: LocalEmote",
         )
@@ -859,7 +1010,7 @@ mod tests {
         );
         let emotes = build_available_prompt_emotes(&glossary, &available).unwrap();
 
-        let prompt = build_prompt_block(&emotes, 2, 2, "sag etwas lustiges", "").unwrap();
+        let prompt = build_prompt_block(&emotes, 2, 2, &[], "sag etwas lustiges", "").unwrap();
 
         let local_pos = prompt.find("- LocalEmote:").unwrap();
         let kekw_pos = prompt.find("- KEKW:").unwrap();
@@ -897,7 +1048,7 @@ mod tests {
         let emotes = build_available_prompt_emotes(&glossary, &available).unwrap();
 
         // "lustig" matches the instruction terms; "Idle" scores zero.
-        let prompt = build_prompt_block(&emotes, 8, 0, "etwas lustiges", "").unwrap();
+        let prompt = build_prompt_block(&emotes, 8, 0, &[], "etwas lustiges", "").unwrap();
 
         assert!(prompt.contains("- Hit:"));
         assert!(
@@ -945,7 +1096,7 @@ mod tests {
         let emotes = build_available_prompt_emotes(&glossary, &available).unwrap();
 
         // No instruction terms ≥4 chars and no recent chat → nothing scores.
-        let prompt = build_prompt_block(&emotes, 8, 2, "hi", "").unwrap();
+        let prompt = build_prompt_block(&emotes, 8, 2, &[], "hi", "").unwrap();
 
         // Exactly the baseline floor, in glossary order.
         assert!(prompt.contains("- First:"));
@@ -967,7 +1118,188 @@ mod tests {
         let available = merge_emote_sets(vec![SevenTvEmote { name: "A".into() }], Vec::new());
         let emotes = build_available_prompt_emotes(&glossary, &available).unwrap();
 
-        assert!(build_prompt_block(&emotes, 0, 0, "hi", "").is_none());
+        assert!(build_prompt_block(&emotes, 0, 0, &[], "hi", "").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Pinned-core tests
+    // -----------------------------------------------------------------------
+
+    fn glossary_emote(name: &str, meaning: &str) -> GlossaryEmote {
+        GlossaryEmote {
+            name: name.into(),
+            meaning: meaning.into(),
+            usage: None,
+            avoid: None,
+        }
+    }
+
+    fn available_prompt_emotes(glossary: &[GlossaryEmote]) -> Vec<PromptEmote> {
+        let available = merge_emote_sets(
+            glossary
+                .iter()
+                .map(|g| SevenTvEmote {
+                    name: g.name.clone(),
+                })
+                .collect(),
+            Vec::new(),
+        );
+        build_available_prompt_emotes(glossary, &available).unwrap()
+    }
+
+    #[test]
+    fn pinned_emote_always_present_and_leads_even_without_scoring() {
+        let glossary = vec![
+            glossary_emote("First", "platzhalter"),
+            glossary_emote("Second", "platzhalter"),
+            glossary_emote("PinnedReflex", "lacht"),
+        ];
+        let emotes = available_prompt_emotes(&glossary);
+        // No scoring hits, baseline floor = 2 → without pinning only First+Second
+        // would appear. Pinning PinnedReflex must inject it anyway, first.
+        let pinned = vec!["PinnedReflex".to_string()];
+        let prompt = build_prompt_block(&emotes, 8, 2, &pinned, "hi", "").unwrap();
+
+        let pinned_pos = prompt
+            .find("- PinnedReflex:")
+            .expect("pinned emote must be present");
+        let first_pos = prompt.find("- First:").expect("baseline fill present");
+        assert!(
+            pinned_pos < first_pos,
+            "pinned core must lead the block:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn pinned_emote_absent_from_catalog_is_dropped() {
+        let glossary = vec![glossary_emote("First", "platzhalter")];
+        let emotes = available_prompt_emotes(&glossary);
+        let pinned = vec!["Ghost".to_string()]; // not in the available set
+        let prompt = build_prompt_block(&emotes, 8, 1, &pinned, "hi", "").unwrap();
+        assert!(
+            !prompt.contains("Ghost"),
+            "absent pin must be dropped:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("- First:"),
+            "baseline still fills:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn no_emote_appears_twice_across_pinned_scored_baseline() {
+        // KEKW is pinned AND matches the instruction (would also score) AND is a
+        // baseline candidate — it must appear exactly once.
+        let glossary = vec![
+            glossary_emote("KEKW", "lustig lachen"),
+            glossary_emote("Filler", "platzhalter"),
+        ];
+        let emotes = available_prompt_emotes(&glossary);
+        let pinned = vec!["KEKW".to_string()];
+        let prompt =
+            build_prompt_block(&emotes, 8, 4, &pinned, "etwas lustig", "KEKW KEKW").unwrap();
+        let occurrences = prompt.matches("- KEKW:").count();
+        assert_eq!(occurrences, 1, "KEKW must not be duplicated:\n{prompt}");
+    }
+
+    #[test]
+    fn pinned_core_capped_by_max_prompt_emotes() {
+        let glossary = vec![
+            glossary_emote("A", "x"),
+            glossary_emote("B", "y"),
+            glossary_emote("C", "z"),
+        ];
+        let emotes = available_prompt_emotes(&glossary);
+        let pinned = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        // max=2: only the first two pins fit; the window stays capped.
+        let prompt = build_prompt_block(&emotes, 2, 0, &pinned, "hi", "").unwrap();
+        assert!(prompt.contains("- A:"));
+        assert!(prompt.contains("- B:"));
+        assert!(
+            !prompt.contains("- C:"),
+            "window must stay capped at 2:\n{prompt}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // pins_missing_from_glossary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pins_missing_from_glossary_reports_only_unknown_names() {
+        let glossary = vec![
+            glossary_emote("PepeLa", "lacht"),
+            glossary_emote("okjj", "ok"),
+        ];
+        let pinned = vec!["PepeLa".to_string(), "Typo".to_string(), "okjj".to_string()];
+        let missing = pins_missing_from_glossary(&pinned, &glossary);
+        assert_eq!(missing, vec!["Typo".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // search_emotes ranking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_ranks_name_match_above_term_match() {
+        let glossary = vec![
+            glossary_emote("SomethingFunny", "ein lustiger Moment"),
+            glossary_emote("Pepe", "irgendwas"),
+        ];
+        let emotes = available_prompt_emotes(&glossary);
+        // Query "pepe" hits the name of "Pepe" (bonus) but only a weak/no term
+        // match on the other entry → "Pepe" ranks first.
+        let ranked = select_search_emotes(&emotes, "pepe", 10);
+        assert_eq!(ranked.first().map(|e| e.name.as_str()), Some("Pepe"));
+    }
+
+    #[test]
+    fn search_matches_meaning_terms() {
+        let glossary = vec![
+            glossary_emote("KEKW", "lachen wenn etwas lustig ist"),
+            glossary_emote("Sadge", "traurig sein"),
+        ];
+        let emotes = available_prompt_emotes(&glossary);
+        let ranked = select_search_emotes(&emotes, "lustig", 10);
+        let names: Vec<&str> = ranked.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"KEKW"), "meaning match expected: {names:?}");
+        assert!(
+            !names.contains(&"Sadge"),
+            "non-match must be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn search_respects_limit() {
+        let glossary: Vec<GlossaryEmote> = (0..25)
+            .map(|i| glossary_emote(&format!("Laugh{i}"), "lachen lustig moment"))
+            .collect();
+        let emotes = available_prompt_emotes(&glossary);
+        let ranked = select_search_emotes(&emotes, "lachen", SEARCH_EMOTES_LIMIT);
+        assert_eq!(ranked.len(), SEARCH_EMOTES_LIMIT, "must cap at the limit");
+    }
+
+    #[test]
+    fn search_block_is_graceful_when_nothing_matches() {
+        let glossary = vec![glossary_emote("KEKW", "lachen")];
+        let emotes = available_prompt_emotes(&glossary);
+        let block = build_search_block(&emotes, "zzzzqqqq", SEARCH_EMOTES_LIMIT);
+        assert!(block.contains("No emotes matched"), "got: {block}");
+    }
+
+    #[test]
+    fn search_block_renders_matches_in_prompt_line_format() {
+        let glossary = vec![GlossaryEmote {
+            name: "KEKW".into(),
+            meaning: "lachen".into(),
+            usage: Some("bei witzen".into()),
+            avoid: Some("ernste themen".into()),
+        }];
+        let emotes = available_prompt_emotes(&glossary);
+        let block = build_search_block(&emotes, "lachen", SEARCH_EMOTES_LIMIT);
+        assert!(block.contains("- KEKW: meaning=lachen"), "got: {block}");
+        assert!(block.contains("use=bei witzen"), "got: {block}");
+        assert!(block.contains("avoid=ernste themen"), "got: {block}");
     }
 
     // -----------------------------------------------------------------------
@@ -1045,7 +1377,8 @@ meaning = "fifth"
         let handle = make_emotes_handle(5);
         let caps = live_caps_from_handle(&handle);
         assert_eq!(caps.max_prompt_emotes, 5);
-        let prompt5 = build_prompt_block(&emotes, caps.max_prompt_emotes, 5, "hi", "").unwrap();
+        let prompt5 =
+            build_prompt_block(&emotes, caps.max_prompt_emotes, 5, &[], "hi", "").unwrap();
         assert!(prompt5.contains("- A:"));
         assert!(prompt5.contains("- E:"));
 
@@ -1061,6 +1394,7 @@ meaning = "fifth"
             &emotes,
             caps2.max_prompt_emotes,
             caps2.min_baseline_emotes,
+            &[],
             "hi",
             "",
         )

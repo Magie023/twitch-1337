@@ -342,6 +342,21 @@ fn validate_ai(ai: &AiSettings, errs: &mut Vec<FieldError>) {
                 "must be <= max_prompt_emotes".into(),
             );
         }
+        // Pinned core is injected before scoring/baseline; if it alone exceeds
+        // the window cap there is no room left for any scored or baseline emote.
+        // (Names absent from the glossary are dropped with a warning at the
+        // provider, not rejected here — see SevenTvEmoteProvider.)
+        if em.pinned_emotes.len() > em.max_prompt_emotes {
+            err(
+                errs,
+                "ai.emotes.pinned_emotes",
+                format!(
+                    "must have <= max_prompt_emotes entries (got {}, max {})",
+                    em.pinned_emotes.len(),
+                    em.max_prompt_emotes
+                ),
+            );
+        }
         if let Some(url) = em.base_url.as_deref()
             && url.trim().is_empty()
         {
@@ -570,6 +585,39 @@ mod tests {
             differ_errors, 0,
             "spurious 'must differ' error must not fire when both channels are blank"
         );
+    }
+
+    #[test]
+    fn validate_rejects_pinned_emotes_exceeding_max() {
+        use crate::settings::ai::AiEmotes;
+        let mut s = Settings::compiled_defaults();
+        s.ai.emotes = Some(AiEmotes {
+            max_prompt_emotes: 2,
+            min_baseline_emotes: 0,
+            pinned_emotes: vec!["A".into(), "B".into(), "C".into()],
+            ..AiEmotes::default()
+        });
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("3 pins > max 2 must fail");
+        assert!(errs.iter().any(|e| e.field == "ai.emotes.pinned_emotes"));
+    }
+
+    #[test]
+    fn validate_accepts_pinned_emotes_within_max() {
+        use crate::settings::ai::AiEmotes;
+        let mut s = Settings::compiled_defaults();
+        s.ai.emotes = Some(AiEmotes {
+            max_prompt_emotes: 20,
+            pinned_emotes: vec!["PepeLa".into(), "okjj".into()],
+            ..AiEmotes::default()
+        });
+        s.validate(&ValidationContext {
+            channel: "test".into(),
+        })
+        .expect("2 pins <= max 20 must pass");
     }
 
     #[test]

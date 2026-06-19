@@ -170,6 +170,8 @@ struct SaveForm {
     #[serde(default)]
     ai_emotes_min_baseline_emotes: Option<usize>,
     #[serde(default)]
+    ai_emotes_pinned_emotes: Option<String>,
+    #[serde(default)]
     ai_emotes_base_url: Option<String>,
 
     // ---- AI media card ----

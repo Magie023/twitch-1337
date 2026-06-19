@@ -255,6 +255,7 @@ fn resolve_emotes(
             .unwrap_or(base.refresh_interval_secs),
         max_prompt_emotes: o.max_prompt_emotes.unwrap_or(base.max_prompt_emotes),
         min_baseline_emotes: o.min_baseline_emotes.unwrap_or(base.min_baseline_emotes),
+        pinned_emotes: o.pinned_emotes.clone().unwrap_or(base.pinned_emotes),
         base_url: match &o.base_url {
             Some(v) => v.clone(),
             None => base.base_url,
@@ -413,6 +414,45 @@ mod tests {
         assert_eq!(r.suspend.default_duration_secs, 900);
         assert_eq!(r.web.session_ttl_secs, 3600 * 12);
         assert_eq!(r.web.mod_check_refresh_secs, 120);
+    }
+
+    #[test]
+    fn emotes_pinned_override_wholesale_replaces() {
+        use crate::settings::overrides::{AiEmotesOverrides, AiOverrides};
+        let defaults = Settings::compiled_defaults();
+        let overrides = SettingsOverrides {
+            ai: AiOverrides {
+                emotes: AiEmotesOverrides {
+                    enabled: Some(true),
+                    pinned_emotes: Some(vec!["PepeLa".into(), "Clueless".into()]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..SettingsOverrides::default()
+        };
+        let r = Settings::resolve(&defaults, &overrides);
+        let e = r.ai.emotes.expect("emotes enabled");
+        assert_eq!(e.pinned_emotes, vec!["PepeLa", "Clueless"]);
+    }
+
+    #[test]
+    fn emotes_pinned_none_override_resolves_to_default_seed() {
+        use crate::settings::overrides::{AiEmotesOverrides, AiOverrides};
+        let defaults = Settings::compiled_defaults();
+        let overrides = SettingsOverrides {
+            ai: AiOverrides {
+                emotes: AiEmotesOverrides {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..SettingsOverrides::default()
+        };
+        let r = Settings::resolve(&defaults, &overrides);
+        let e = r.ai.emotes.expect("emotes enabled");
+        assert_eq!(e.pinned_emotes, vec!["PepeLa", "okjj"]);
     }
 
     #[test]

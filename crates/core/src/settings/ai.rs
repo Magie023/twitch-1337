@@ -129,7 +129,20 @@ pub struct AiEmotes {
     pub refresh_interval_secs: u64,
     pub max_prompt_emotes: usize,
     pub min_baseline_emotes: usize,
+    /// Emote codes always injected into the per-turn block (the persona's
+    /// reflex emotes from the live persona prompt). Names absent from the
+    /// baked glossary are dropped with a warning; the list must not exceed
+    /// `max_prompt_emotes`. Owner-managed; not auto-synced from SOUL.md.
+    #[serde(default = "default_pinned_emotes")]
+    pub pinned_emotes: Vec<String>,
     pub base_url: Option<String>,
+}
+
+/// Seed pins to the documented soul-reflex codes that exist in the baked
+/// glossary, so the reported "persona told to use emotes it isn't given" bug
+/// is fixed out of the box. Owner extends via the dashboard.
+fn default_pinned_emotes() -> Vec<String> {
+    vec!["PepeLa".to_string(), "okjj".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -229,8 +242,9 @@ impl Default for AiEmotes {
         Self {
             include_global: true,
             refresh_interval_secs: 3600,
-            max_prompt_emotes: 12,
+            max_prompt_emotes: 20,
             min_baseline_emotes: 4,
+            pinned_emotes: default_pinned_emotes(),
             base_url: None,
         }
     }
@@ -271,6 +285,16 @@ mod tests {
     fn ai_behavior_default_has_persona_aurora() {
         let b = AiBehavior::default();
         assert_eq!(b.persona_name, "Aurora");
+    }
+
+    #[test]
+    fn ai_emotes_defaults_pin_soul_reflexes_and_widen_window() {
+        let e = AiEmotes::default();
+        assert_eq!(e.max_prompt_emotes, 20, "default window widened 12 -> 20");
+        assert_eq!(
+            e.pinned_emotes,
+            vec!["PepeLa".to_string(), "okjj".to_string()]
+        );
     }
 
     #[test]

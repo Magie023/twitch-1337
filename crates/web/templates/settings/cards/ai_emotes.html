@@ -41,10 +41,21 @@
        e.refresh_interval_secs, 3600, "s", 60, 86400) %}{% endcall %}
     {% call m::num_row_bounded("ai_emotes", "ai_emotes_max_prompt_emotes", "max_prompt_emotes",
        "Max emotes injected into a single prompt.",
-       e.max_prompt_emotes, 12, "", 1, 200) %}{% endcall %}
+       e.max_prompt_emotes, 20, "", 1, 200) %}{% endcall %}
     {% call m::num_row_bounded("ai_emotes", "ai_emotes_min_baseline_emotes", "min_baseline_emotes",
        "Minimum baseline emotes retained even when filtering by recency.",
        e.min_baseline_emotes, 4, "", 0, 200) %}{% endcall %}
+    <div class="settings-row" data-section="ai_emotes" data-card-enabled-by="ai_emotes_enabled">
+      {% call m::row_head("pinned_emotes", "Emote codes (one per line) always injected into the prompt — the persona's reflex emotes. Names not in the glossary are dropped; total must not exceed max_prompt_emotes.") %}{% endcall %}
+      <div class="row-control-cell">
+        <span class="row-pretty" aria-hidden="true">{% if e.pinned_emotes.is_empty() %}<span class="muted">(empty)</span>{% else %}{{ e.pinned_emotes.join(", ") }}{% endif %}</span>
+        <textarea class="text-input is-wide" rows="4" name="ai_emotes_pinned_emotes" data-key="ai.emotes.pinned_emotes" data-default="PepeLa&#10;okjj">{{ e.pinned_emotes.join("\n") }}</textarea>
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("ai.emotes.pinned_emotes") %}{% endcall %}
+        <span class="row-default">default <span class="mono">PepeLa, okjj</span></span>
+      </div>
+    </div>
     {% let emotes_base_url = e.base_url.as_deref().unwrap_or("") %}
     {% call m::text_row("ai_emotes", "ai_emotes_base_url", "base_url",
        "Override emote-source base URL. Empty = built-in default.",
@@ -71,10 +82,22 @@
        3600, 3600, "s", 60, 86400) %}{% endcall %}
     {% call m::num_row_bounded("ai_emotes", "ai_emotes_max_prompt_emotes", "max_prompt_emotes",
        "Max emotes injected into a single prompt.",
-       12, 12, "", 1, 200) %}{% endcall %}
+       20, 20, "", 1, 200) %}{% endcall %}
     {% call m::num_row_bounded("ai_emotes", "ai_emotes_min_baseline_emotes", "min_baseline_emotes",
        "Minimum baseline emotes retained even when filtering by recency.",
        4, 4, "", 0, 200) %}{% endcall %}
+    <div class="settings-row" data-section="ai_emotes" data-card-enabled-by="ai_emotes_enabled">
+      {% call m::row_head("pinned_emotes", "Emote codes (one per line) always injected into the prompt — the persona's reflex emotes. Names not in the glossary are dropped; total must not exceed max_prompt_emotes.") %}{% endcall %}
+      <div class="row-control-cell">
+        <span class="row-pretty" aria-hidden="true">PepeLa, okjj</span>
+        <textarea class="text-input is-wide" rows="4" name="ai_emotes_pinned_emotes" data-key="ai.emotes.pinned_emotes" data-default="PepeLa&#10;okjj">PepeLa
+okjj</textarea>
+      </div>
+      <div class="row-right">
+        {% call m::row_reset("ai.emotes.pinned_emotes") %}{% endcall %}
+        <span class="row-default">default <span class="mono">PepeLa, okjj</span></span>
+      </div>
+    </div>
     {% call m::text_row("ai_emotes", "ai_emotes_base_url", "base_url",
        "Override emote-source base URL. Empty = built-in default.",
        "", "", "(built-in default)") %}{% endcall %}

@@ -221,6 +221,10 @@ pub struct AiEmotesOverrides {
     pub max_prompt_emotes: Option<usize>,
     #[serde(default)]
     pub min_baseline_emotes: Option<usize>,
+    /// Wholesale-replace list (like `twitch.hidden_admins`): `Some` overrides
+    /// the resolved set, `None` falls through to the default seed.
+    #[serde(default)]
+    pub pinned_emotes: Option<Vec<String>>,
     #[serde(default)]
     pub base_url: Option<Option<String>>,
 }

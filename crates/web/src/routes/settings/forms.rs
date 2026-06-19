@@ -323,6 +323,8 @@ struct AiEmotesForm {
     #[serde(default)]
     ai_emotes_min_baseline_emotes: Option<usize>,
     #[serde(default)]
+    ai_emotes_pinned_emotes: Option<String>,
+    #[serde(default)]
     ai_emotes_base_url: Option<String>,
 }
 
@@ -340,6 +342,13 @@ impl AiEmotesForm {
             refresh_interval_secs: self.ai_emotes_refresh_interval_secs,
             max_prompt_emotes: self.ai_emotes_max_prompt_emotes,
             min_baseline_emotes: self.ai_emotes_min_baseline_emotes,
+            // Wholesale-replace list, gated on card visibility like the
+            // checkboxes: an empty textarea clears the pins rather than
+            // falling back to the seed.
+            pinned_emotes: self
+                .ai_emotes_card_visible
+                .as_ref()
+                .map(|_| parse_id_list(self.ai_emotes_pinned_emotes.as_deref().unwrap_or(""))),
             base_url: self
                 .ai_emotes_base_url
                 .map(|v| if v.is_empty() { None } else { Some(v) }),
@@ -576,6 +585,7 @@ pub(super) fn overrides_from_save_form(form: SaveForm) -> SettingsOverrides {
                 ai_emotes_refresh_interval_secs: form.ai_emotes_refresh_interval_secs,
                 ai_emotes_max_prompt_emotes: form.ai_emotes_max_prompt_emotes,
                 ai_emotes_min_baseline_emotes: form.ai_emotes_min_baseline_emotes,
+                ai_emotes_pinned_emotes: form.ai_emotes_pinned_emotes,
                 ai_emotes_base_url: form.ai_emotes_base_url,
             }
             .into_overrides(),

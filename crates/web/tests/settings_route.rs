@@ -668,6 +668,51 @@ async fn emotes_card_include_global_absent_without_card_visible() {
 }
 
 #[tokio::test]
+async fn emotes_card_pinned_emotes_persists_from_textarea() {
+    // Pinned emotes (one-per-line textarea) must round-trip through the save
+    // handler into the live settings handle.
+    install_crypto();
+    let (state, _td_p, _td_m, _td_s) = build_state_with_all_dirs(empty_helix()).await;
+    set_owner(&state, Some("123"));
+    let (sid, csrf_cookie, bare_csrf) = insert_session_as(&state, "123", "owner", Role::Owner);
+
+    let defaults = state.settings_store.defaults().clone();
+    let app = build_router(state.clone());
+    let body = save_form_body(
+        &bare_csrf,
+        &defaults,
+        &[
+            ("ai_emotes_card_visible", "1"),
+            ("ai_emotes_enabled", "1"),
+            ("ai_emotes_max_prompt_emotes", "20"),
+            ("ai_emotes_pinned_emotes", "PepeLa\nokjj\nClueless"),
+        ],
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/settings")
+        .header(header::COOKIE, cookie_header(&sid, &csrf_cookie))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let pinned = state
+        .settings
+        .load()
+        .ai
+        .emotes
+        .as_ref()
+        .map(|e| e.pinned_emotes.clone());
+    assert_eq!(
+        pinned,
+        Some(vec!["PepeLa".into(), "okjj".into(), "Clueless".into()]),
+        "pinned_emotes must persist from the textarea",
+    );
+}
+
+#[tokio::test]
 async fn media_size_malformed_string_is_ignored() {
     // A malformed byte-size string (e.g. "not-a-size") must not crash the
     // handler; the field parses to None so the previous value is preserved.

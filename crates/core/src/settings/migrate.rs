@@ -106,6 +106,13 @@ pub fn migrate_legacy_ai(root: &toml::Value) -> Result<AiOverrides> {
         out.emotes.refresh_interval_secs = u(&v, "refresh_interval_secs");
         out.emotes.max_prompt_emotes = usz(&v, "max_prompt_emotes");
         out.emotes.min_baseline_emotes = usz(&v, "min_baseline_emotes");
+        if let Some(arr) = v.get("pinned_emotes").and_then(toml::Value::as_array) {
+            out.emotes.pinned_emotes = Some(
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect(),
+            );
+        }
         out.emotes.base_url = s(&v, "base_url").map(Some);
     }
 

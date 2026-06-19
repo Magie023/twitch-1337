@@ -334,6 +334,11 @@ pub(super) fn diff_changes(prior: &Settings, next: &Settings) -> Vec<AuditChange
                 n.min_baseline_emotes
             );
             cmp!(
+                "ai.emotes.pinned_emotes",
+                p.pinned_emotes.as_slice(),
+                n.pinned_emotes.as_slice()
+            );
+            cmp!(
                 "ai.emotes.base_url",
                 p.base_url.as_deref(),
                 n.base_url.as_deref()
@@ -559,6 +564,21 @@ mod tests {
         let keys: Vec<&str> = changes.iter().map(|c| c.key.as_str()).collect();
         assert!(keys.contains(&"ai.connection.service_tier"), "got {keys:?}");
         assert!(keys.contains(&"ai.dreamer.service_tier"), "got {keys:?}");
+    }
+
+    #[test]
+    fn diff_emits_emotes_pinned_change() {
+        use crate::settings::ai::AiEmotes;
+        let mut prior = Settings::compiled_defaults();
+        let mut next = Settings::compiled_defaults();
+        prior.ai.emotes = Some(AiEmotes::default());
+        next.ai.emotes = Some(AiEmotes {
+            pinned_emotes: vec!["PepeLa".into(), "okjj".into(), "Clueless".into()],
+            ..AiEmotes::default()
+        });
+        let changes = diff_changes(&prior, &next);
+        let keys: Vec<&str> = changes.iter().map(|c| c.key.as_str()).collect();
+        assert!(keys.contains(&"ai.emotes.pinned_emotes"), "got {keys:?}");
     }
 
     #[test]
