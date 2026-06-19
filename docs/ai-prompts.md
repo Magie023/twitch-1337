@@ -1,6 +1,6 @@
 # AI Prompts
 
-The bot's prompts live as Markdown files under `$DATA_DIR/prompts/`. Edit them live — every invocation reads from disk, so changes are picked up immediately. Defaults are bundled in `crates/twitch-1337/data/prompts/` and seeded on first run if the file is missing.
+The bot's prompts live as Markdown files in the repo at `crates/core/data/prompts/`, baked into the binary via `include_str!` and used directly at runtime. They are code: the repo is the single source of truth. There is no on-disk override under `$DATA_DIR` — that path was dropped in #321 to end the silent drift between the repo copy and a mutable on-disk copy.
 
 ## Files
 
@@ -47,11 +47,11 @@ Unknown tokens (e.g. typos like `{user_name}`) are left as literal text — no e
 
 ## Editing flow
 
-1. Edit the file under `$DATA_DIR/prompts/` (e.g. `/var/lib/twitch-1337/prompts/system.md` on the production host).
-2. Trigger `!ai` (or wait for the ritual) and observe.
-3. To roll back, copy the bundled default from `crates/twitch-1337/data/prompts/` in the repo.
+1. Edit the file in the repo under `crates/core/data/prompts/`.
+2. Commit on a branch, open a PR, merge. The rolling deploy ships it within minutes (see `CLAUDE.md` → Release flow).
+3. To roll back, revert the commit and merge again.
 
-To restore a default: delete the file under `$DATA_DIR/prompts/` and restart. The seed-on-startup logic rewrites the bundled default. (Editing in place and never deleting means the bundled default is never re-applied — owner edits always win.)
+There is no live, no-restart edit: the running binary always reflects whatever was last merged. `SOUL.md` is unaffected — it's a runtime-owned memory file under `$DATA_DIR/memories/`, not a prompt template, and keeps its dreamer-driven rewriting.
 
 ## Caps and byte budgets
 
@@ -60,4 +60,4 @@ Memory file caps (SOUL 4 KiB, LORE 12 KiB, user 4 KiB, state 2 KiB) are enforced
 ## See also
 
 - `docs/superpowers/specs/2026-04-28-ai-memory-rework-v2-design.md` — full design.
-- `crates/twitch-1337/data/prompts/*.md` — bundled defaults for the three prompt files.
+- `crates/core/data/prompts/*.md` — the prompt templates (source of truth).

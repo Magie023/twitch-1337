@@ -14,8 +14,8 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use crate::ai::memory::inject::{
-    BuildOpts, FenceLabel, InvocationChannel, SubstitutionVars, build_chat_turn_context,
-    fence_block, fresh_nonce, scrub_for_inject, substitute,
+    BuildOpts, FenceLabel, InvocationChannel, PROMPT_DREAMER, SubstitutionVars,
+    build_chat_turn_context, fence_block, fresh_nonce, scrub_for_inject, substitute,
 };
 use crate::ai::memory::store::MemoryStore;
 use crate::ai::memory::tools::{DreamerExecutor, DreamerExecutorOpts, dreamer_tools};
@@ -154,14 +154,13 @@ pub async fn run_ritual(
         &scrub_for_inject(&transcript_text),
     );
 
-    let dreamer_template =
-        tokio::fs::read_to_string(store.prompts_dir().join("dreamer.md")).await?;
     let now_str = chrono::Utc::now()
         .with_timezone(&Berlin)
         .format("%Y-%m-%d")
         .to_string();
+    // Prompt template is baked into the binary (#321), not read from disk.
     let head = substitute(
-        &dreamer_template,
+        PROMPT_DREAMER,
         SubstitutionVars {
             speaker_username: "dreamer",
             speaker_display: "dreamer",
@@ -292,15 +291,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        // The `dreamer.md` prompt template must exist or `run_ritual` errors.
-        let prompts_dir = store.prompts_dir();
-        tokio::fs::create_dir_all(&prompts_dir).await.unwrap();
-        tokio::fs::write(
-            prompts_dir.join("dreamer.md"),
-            "system prompt for {channel}",
-        )
-        .await
-        .unwrap();
+        // No prompt files are seeded to disk (#321) — `run_ritual` uses the
+        // baked-in `dreamer.md` template directly, so it works with nothing
+        // under `$DATA_DIR/prompts/`.
 
         let recorder = Arc::new(ModelRecorder(Mutex::new(Vec::new())));
         let yesterday = NaiveDate::from_ymd_opt(2026, 4, 17).unwrap();

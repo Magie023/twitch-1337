@@ -1,5 +1,5 @@
 //! Filesystem layer for v2 memory: read/write/list under per-path mutex,
-//! atomic tmp+rename, byte caps, soul + prompt seeding, v1 disposal.
+//! atomic tmp+rename, byte caps, soul seeding, v1 disposal.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,9 +80,6 @@ pub struct FrontmatterOverride {
 }
 
 const SOUL_SEED: &str = include_str!("../../../data/prompts/seed_soul.md");
-const PROMPT_SYSTEM: &str = include_str!("../../../data/prompts/system.md");
-const PROMPT_INSTRUCTIONS: &str = include_str!("../../../data/prompts/ai_instructions.md");
-const PROMPT_DREAMER: &str = include_str!("../../../data/prompts/dreamer.md");
 
 #[derive(Clone)]
 pub struct MemoryStore {
@@ -92,7 +89,6 @@ pub struct MemoryStore {
 struct StoreInner {
     root: PathBuf,         // $DATA_DIR
     memories_dir: PathBuf, // $DATA_DIR/memories
-    prompts_dir: PathBuf,  // $DATA_DIR/prompts
     settings: SettingsHandle,
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     /// Serialises new state-file creation so the `max_state_files` cap can't
@@ -104,13 +100,11 @@ struct StoreInner {
 impl MemoryStore {
     pub async fn open(data_dir: &Path, settings: SettingsHandle) -> Result<Self> {
         let memories_dir = data_dir.join("memories");
-        let prompts_dir = data_dir.join("prompts");
         for p in [
             &memories_dir,
             &memories_dir.join("users"),
             &memories_dir.join("state"),
             &memories_dir.join("transcripts"),
-            &prompts_dir,
         ] {
             tokio::fs::create_dir_all(p)
                 .await
@@ -153,25 +147,10 @@ impl MemoryStore {
                 .await
                 .wrap_err("seed LORE.md")?;
         }
-        // Prompt files: write defaults only when missing.
-        for (name, default) in [
-            ("system.md", PROMPT_SYSTEM),
-            ("ai_instructions.md", PROMPT_INSTRUCTIONS),
-            ("dreamer.md", PROMPT_DREAMER),
-        ] {
-            let p = prompts_dir.join(name);
-            if !tokio::fs::try_exists(&p).await.unwrap_or(false) {
-                atomic_write_bytes_async(default.as_bytes(), &p)
-                    .await
-                    .wrap_err_with(|| format!("seed prompt {name}"))?;
-            }
-        }
-
         Ok(Self {
             inner: Arc::new(StoreInner {
                 root: data_dir.to_path_buf(),
                 memories_dir,
-                prompts_dir,
                 settings,
                 locks: Mutex::new(HashMap::new()),
                 state_create_lock: Mutex::new(()),
@@ -187,10 +166,6 @@ impl MemoryStore {
 
     pub fn memories_dir(&self) -> &Path {
         &self.inner.memories_dir
-    }
-
-    pub fn prompts_dir(&self) -> &Path {
-        &self.inner.prompts_dir
     }
 
     pub fn root(&self) -> &Path {
@@ -627,17 +602,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_seeds_prompts_on_first_run_only() {
+    async fn open_does_not_seed_prompts_to_disk() {
+        // Prompts are code now (#321): baked into the binary via `include_str!`
+        // and used directly at runtime. `open` must not create or seed a
+        // `$DATA_DIR/prompts/` dir — there is no on-disk override to drift.
         let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(dir.path(), test_handle()).await.unwrap();
-        let p = dir.path().join("prompts/system.md");
-        assert!(p.exists());
-        tokio::fs::write(&p, b"USER EDITED").await.unwrap();
-        // Reopen: edited file must be preserved.
-        let _ = MemoryStore::open(dir.path(), test_handle()).await.unwrap();
-        let s = tokio::fs::read_to_string(&p).await.unwrap();
-        assert_eq!(s, "USER EDITED");
-        let _ = store; // suppress unused
+        MemoryStore::open(dir.path(), test_handle()).await.unwrap();
+        assert!(
+            !dir.path().join("prompts").exists(),
+            "open must not create a prompts dir"
+        );
     }
 
     #[tokio::test]

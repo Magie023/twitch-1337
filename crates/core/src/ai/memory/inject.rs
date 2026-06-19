@@ -15,6 +15,16 @@ use crate::ai::memory::types::FileKind;
 const FENCE_OPEN: &str = "<<<FILE";
 const FENCE_CLOSE: &str = "<<<ENDFILE";
 
+// Prompt templates are code (#321): baked into the binary and used directly at
+// runtime by the !ai handler and the dreamer ritual. The repo copy
+// (`crates/core/data/prompts/`) is the single source of truth — no on-disk
+// override, no drift. Substitution of `{speaker_*}`/`{date}`/`{model}`/`{channel}`
+// happens in `substitute` below.
+pub(crate) const PROMPT_SYSTEM: &str = include_str!("../../../data/prompts/system.md");
+pub(crate) const PROMPT_INSTRUCTIONS: &str =
+    include_str!("../../../data/prompts/ai_instructions.md");
+pub(crate) const PROMPT_DREAMER: &str = include_str!("../../../data/prompts/dreamer.md");
+
 /// Identifies what a fenced inject block represents. Renders into the FILE
 /// header attrs so the model can map a block to its subject without parsing
 /// a path. Path-style addressing only re-appears in the `write_file` tool's
@@ -556,7 +566,7 @@ mod tests {
     fn bundled_ai_instructions_substitutes_speaker_marker_cleanly() {
         // Drives the production prompt through substitute() and verifies the
         // marker line emerges with no leftover `{...}` placeholders.
-        let tmpl = include_str!("../../../data/prompts/ai_instructions.md");
+        let tmpl = PROMPT_INSTRUCTIONS;
         let out = substitute(
             tmpl,
             SubstitutionVars {
@@ -598,7 +608,7 @@ mod tests {
     fn bundled_system_substitutes_cleanly() {
         // Mirror the ai_instructions check: drive the bundled system prompt
         // through substitute() and verify no `{...}` placeholders survive.
-        let tmpl = include_str!("../../../data/prompts/system.md");
+        let tmpl = PROMPT_SYSTEM;
         let out = substitute(
             tmpl,
             SubstitutionVars {

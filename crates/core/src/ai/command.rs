@@ -379,12 +379,6 @@ where
             .format("%Y-%m-%d")
             .to_string();
 
-        // Re-read each turn so owner edits land without restart.
-        let prompts_dir = mem.store.prompts_dir();
-        let (system_template, instructions_template) = tokio::try_join!(
-            tokio::fs::read_to_string(prompts_dir.join("system.md")),
-            tokio::fs::read_to_string(prompts_dir.join("ai_instructions.md")),
-        )?;
         let sender_display = if ctx.privmsg.sender.name.is_empty() {
             ctx.privmsg.sender.login.as_str()
         } else {
@@ -401,8 +395,9 @@ where
             model: &model_display,
             model_id: &model,
         };
-        let mut system_prompt_head = inject::substitute(&system_template, vars);
-        let instructions_head = inject::substitute(&instructions_template, vars);
+        // Prompt templates are baked into the binary (#321), not read from disk.
+        let mut system_prompt_head = inject::substitute(inject::PROMPT_SYSTEM, vars);
+        let instructions_head = inject::substitute(inject::PROMPT_INSTRUCTIONS, vars);
 
         let invocation_channel = if cc.is_some_and(|c| c.is_ai_channel(&ctx.privmsg.channel_login))
         {
