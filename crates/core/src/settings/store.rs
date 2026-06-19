@@ -98,20 +98,24 @@ impl SettingsStore {
         patch: SettingsOverrides,
         actor: Actor,
     ) -> Result<Settings, SettingsError> {
-        let _g = self.write_lock.lock().await;
-        let mut current = load_overrides_async(&self.path).await?.unwrap_or_default();
-        let prior_resolved = Settings::resolve(&self.defaults, &current);
-        merge_into(&mut current, &patch);
-        let resolved = Settings::resolve(&self.defaults, &current);
-        let ctx = super::ValidationContext {
-            channel: self.boot_channel.clone(),
-        };
-        if let Err(errs) = resolved.validate(&ctx) {
-            return Err(SettingsError::Validation(errs));
-        }
-        crate::util::persist::atomic_save_ron_async(&current, &self.path).await?;
+        self.apply_with(move |current| merge_into(current, &patch), actor)
+            .await
+    }
+
+    /// Shared tail of every mutating path: persist the overrides atomically,
+    /// swap the live handle, append an audit entry for any diff, and signal
+    /// change waiters. Callers resolve (and, where appropriate, validate)
+    /// before handing the resolved snapshot here.
+    async fn commit(
+        &self,
+        current: &SettingsOverrides,
+        prior_resolved: &Settings,
+        resolved: Settings,
+        actor: Actor,
+    ) -> Result<Settings, SettingsError> {
+        crate::util::persist::atomic_save_ron_async(current, &self.path).await?;
         self.handle.store(Arc::new(resolved.clone()));
-        let changes = diff_changes(&prior_resolved, &resolved);
+        let changes = diff_changes(prior_resolved, &resolved);
         if !changes.is_empty() {
             let entry = AuditEntry {
                 ts: berlin_now(Utc::now()),
@@ -151,22 +155,8 @@ impl SettingsStore {
         if let Err(errs) = resolved.validate(&ctx) {
             return Err(SettingsError::Validation(errs));
         }
-        crate::util::persist::atomic_save_ron_async(&current, &self.path).await?;
-        self.handle.store(Arc::new(resolved.clone()));
-        let changes = diff_changes(&prior_resolved, &resolved);
-        if !changes.is_empty() {
-            let entry = AuditEntry {
-                ts: berlin_now(Utc::now()),
-                actor_id: actor.user_id,
-                actor_login: actor.user_login,
-                changes,
-            };
-            if let Err(e) = self.audit.append(&entry) {
-                error!(error = ?e, "audit append failed");
-            }
-        }
-        self.change_notify.notify_waiters();
-        Ok(resolved)
+        self.commit(&current, &prior_resolved, resolved, actor)
+            .await
     }
 
     pub async fn reset(
@@ -206,25 +196,8 @@ impl SettingsStore {
             SettingsSection::Schedules => current.schedules = None,
         }
         let resolved = Settings::resolve(&self.defaults, &current);
-        crate::util::persist::atomic_save_ron_async(&current, &self.path).await?;
-        self.handle.store(Arc::new(resolved.clone()));
-        let changes = diff_changes(&prior_resolved, &resolved);
-        if !changes.is_empty() {
-            let entry = AuditEntry {
-                ts: berlin_now(Utc::now()),
-                actor_id: actor.user_id,
-                actor_login: actor.user_login,
-                changes,
-            };
-            if let Err(e) = self.audit.append(&entry) {
-                error!(error = ?e, "audit append failed");
-            }
-        }
-        // Notify unconditionally even on a no-op write: idempotent reload is
-        // cheap, and skipping based on diff_changes would couple change
-        // notifications to the audit-log diff logic.
-        self.change_notify.notify_waiters();
-        Ok(resolved)
+        self.commit(&current, &prior_resolved, resolved, actor)
+            .await
     }
 }
 

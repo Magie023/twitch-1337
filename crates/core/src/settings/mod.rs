@@ -100,6 +100,23 @@ pub struct FieldError {
     pub message: String,
 }
 
+/// Push a "must be lo..=hi seconds" `FieldError` when `v` is out of range.
+/// Generic over the numeric type so any bounded `..._secs` field can use it.
+fn bound<T: PartialOrd + std::fmt::Display>(
+    name: &str,
+    v: T,
+    lo: T,
+    hi: T,
+    errs: &mut Vec<FieldError>,
+) {
+    if v < lo || v > hi {
+        errs.push(FieldError {
+            field: name.to_owned(),
+            message: format!("must be {lo}..={hi} seconds (got {v})"),
+        });
+    }
+}
+
 /// Bootstrap-side context required for cross-field validation. `channel`
 /// is the IRC channel from config.toml, used to enforce that
 /// `twitch.admin_channel` and `twitch.ai_channel` differ from it.
@@ -152,14 +169,6 @@ impl Settings {
 
     pub fn validate(&self, ctx: &ValidationContext) -> Result<(), Vec<FieldError>> {
         let mut errs = Vec::new();
-        fn bound(name: &str, v: u64, lo: u64, hi: u64, errs: &mut Vec<FieldError>) {
-            if v < lo || v > hi {
-                errs.push(FieldError {
-                    field: name.to_owned(),
-                    message: format!("must be {lo}..={hi} seconds (got {v})"),
-                });
-            }
-        }
         bound("cooldowns.ai", self.cooldowns.ai, 1, 3600, &mut errs);
         bound("cooldowns.news", self.cooldowns.news, 1, 3600, &mut errs);
         bound("cooldowns.up", self.cooldowns.up, 1, 3600, &mut errs);

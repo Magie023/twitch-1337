@@ -228,6 +228,14 @@ fn extract_api_error(body: &serde_json::Value) -> Option<String> {
     Some(parts.join(" "))
 }
 
+/// Build the `LlmError::Provider` error for a non-success HTTP response,
+/// consuming the body for diagnostics. Shared by both request paths.
+async fn provider_error(response: reqwest::Response) -> LlmError {
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    LlmError::Provider { status, body }
+}
+
 // --- Client ---
 
 /// HTTP client for any OpenAI-compatible API (OpenRouter, OpenAI, etc.).
@@ -328,12 +336,7 @@ impl LlmClient for OpenAiClient {
         let response = self.http.post(&url).json(&api_request).send().await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::Provider {
-                status: status.as_u16(),
-                body,
-            });
+            return Err(provider_error(response).await);
         }
 
         let body: serde_json::Value = response.json().await?;
@@ -410,12 +413,7 @@ impl LlmClient for OpenAiClient {
         let response = self.http.post(&url).json(&api_request).send().await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::Provider {
-                status: status.as_u16(),
-                body,
-            });
+            return Err(provider_error(response).await);
         }
 
         let body: serde_json::Value = response.json().await?;
