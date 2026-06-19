@@ -24,8 +24,15 @@ fn format_alt(alt_ft: Option<i64>) -> String {
 }
 
 fn format_route(route: &Option<(String, String)>) -> String {
+    route
+        .as_ref()
+        .map(|(orig, dest)| format!("{orig}\u{2192}{dest}"))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn format_route_suffix(route: &Option<(String, String)>) -> String {
     match route {
-        Some((orig, dest)) => format!(" {orig}\u{2192}{dest}"),
+        Some(_) => format!(" {}", format_route(route)),
         None => String::new(),
     }
 }
@@ -176,13 +183,13 @@ fn format_flight_prefix(flight: &TrackedFlight) -> String {
         .as_ref()
         .map(|t| format!(" ({t})"))
         .unwrap_or_default();
-    let route = format_route(&flight.route);
+    let route = format_route_suffix(&flight.route);
     format!("{name}{typ}{route}")
 }
 
 pub(crate) fn msg_track_started(flight: &TrackedFlight) -> String {
     format!(
-        "Tracke {} Okayge{}",
+        "Tracking gestartet: {} | Status: aktiv{}",
         format_flight_prefix(flight),
         format_adsb_link_suffix(flight.hex.as_deref())
     )
@@ -244,11 +251,10 @@ pub(crate) fn msg_possible_divert(flight: &TrackedFlight) -> String {
 }
 
 pub(crate) fn msg_tracking_lost(flight: &TrackedFlight) -> String {
-    let name = flight
-        .callsign
-        .as_deref()
-        .unwrap_or(flight.identifier.as_str());
-    format!("{name} Signal verloren, wird nicht mehr getrackt")
+    format!(
+        "Tracking lost: {} | Status: automatisch entfernt | Grund: kein ADS-B Signal mehr",
+        format_flight_prefix(flight)
+    )
 }
 
 pub(crate) fn msg_adsb_visible(flight: &TrackedFlight) -> String {
@@ -260,7 +266,7 @@ pub(crate) fn msg_adsb_visible(flight: &TrackedFlight) -> String {
 
 pub(crate) fn msg_pending_expired(flight: &TrackedFlight) -> String {
     format!(
-        "{} ist nicht im ADS-B aufgetaucht, wird nicht mehr getrackt",
+        "Tracking automatisch entfernt: {} | Status: nicht erschienen | Grund: nie im ADS-B gesehen",
         format_flight_prefix(flight)
     )
 }
@@ -284,8 +290,17 @@ pub(crate) fn msg_flight_status(flight: &TrackedFlight, now: DateTime<Utc>) -> S
     let alt = format_alt(flight.altitude_ft);
     let speed = flight
         .ground_speed_kts
-        .map(|gs| format!(" | {gs:.0}kts"))
-        .unwrap_or_default();
+        .map(|gs| format!("{gs:.0}kt"))
+        .unwrap_or_else(|| "?".to_string());
+    let last_seen = flight
+        .last_seen
+        .map(|seen| {
+            format!(
+                "vor {}",
+                format_duration_hm(now.signed_duration_since(seen))
+            )
+        })
+        .unwrap_or_else(|| "nie".to_string());
     let squawk = flight
         .squawk
         .as_ref()
@@ -294,8 +309,9 @@ pub(crate) fn msg_flight_status(flight: &TrackedFlight, now: DateTime<Utc>) -> S
     let elapsed = now.signed_duration_since(flight.tracked_at);
     let tracking_time = format!("seit {} getrackt", format_duration_hm(elapsed));
     format!(
-        "{prefix} | {} {alt}{speed}{squawk} | {tracking_time}{adsb_link}",
-        flight.phase
+        "{prefix} | Phase: {} | Höhe: {alt} | Geschwindigkeit: {speed} | Route: {} | Letzte Sichtung: {last_seen}{squawk} | Status: {tracking_time}{adsb_link}",
+        flight.phase,
+        format_route(&flight.route)
     )
 }
 
@@ -313,10 +329,15 @@ pub(crate) fn msg_flights_list(flights: &[TrackedFlight]) -> String {
             } else {
                 format!("{}", f.phase)
             };
-            format!("{name} ({phase} {alt})")
+            let route = format_route(&f.route);
+            let speed = f
+                .ground_speed_kts
+                .map(|gs| format!(" {gs:.0}kt"))
+                .unwrap_or_default();
+            format!("{name}: {phase} {alt}{speed} {route}")
         })
         .collect();
-    format!("Getrackte Fl\u{00fc}ge: {}", parts.join(" | "))
+    format!("Aktive Tracks: {}", parts.join(" | "))
 }
 
 #[cfg(test)]
@@ -338,32 +359,48 @@ mod tests {
     }
 
     #[test]
-    fn msg_track_started_includes_adsb_link_when_hex_known() {
+    fn msg_track_started_includes_key_tokens_when_hex_known() {
         let msg = msg_track_started(&status_flight(Some("3C6589")));
 
-        assert_eq!(
-            msg,
-            "Tracke DLH1929 Okayge | https://globe.adsbexchange.com/?icao=3c6589"
-        );
+        for token in [
+            "Tracking gestartet",
+            "DLH1929",
+            "Status: aktiv",
+            "icao=3c6589",
+        ] {
+            assert!(msg.contains(token), "missing {token:?} in {msg}");
+        }
     }
 
     #[test]
     fn msg_track_started_omits_adsb_link_without_hex() {
         let msg = msg_track_started(&status_flight(None));
 
-        assert_eq!(msg, "Tracke DLH1929 Okayge");
+        assert!(msg.contains("Tracking gestartet"));
+        assert!(msg.contains("DLH1929"));
+        assert!(!msg.contains("adsbexchange"));
     }
 
     #[test]
-    fn msg_flight_status_includes_adsb_link_when_hex_known() {
+    fn msg_flight_status_includes_snapshot_tokens_when_hex_known() {
         let now = dt("2026-04-18T12:30:00Z");
+        let mut flight = status_flight(Some("3C6589"));
+        flight.route = Some(("FRA".to_string(), "MUC".to_string()));
 
-        let msg = msg_flight_status(&status_flight(Some("3C6589")), now);
+        let msg = msg_flight_status(&flight, now);
 
-        assert_eq!(
-            msg,
-            "DLH1929 | Cruise FL120 | 280kts | Squawk 1000 | seit 30m getrackt | https://globe.adsbexchange.com/?icao=3c6589"
-        );
+        for token in [
+            "DLH1929",
+            "Phase: Cruise",
+            "Höhe: FL120",
+            "Geschwindigkeit: 280kt",
+            "Route: FRA→MUC",
+            "Letzte Sichtung: vor 29m",
+            "Status:",
+            "icao=3c6589",
+        ] {
+            assert!(msg.contains(token), "missing {token:?} in {msg}");
+        }
     }
 
     #[test]
@@ -372,9 +409,49 @@ mod tests {
 
         let msg = msg_flight_status(&status_flight(None), now);
 
-        assert_eq!(
-            msg,
-            "DLH1929 | Cruise FL120 | 280kts | Squawk 1000 | seit 30m getrackt"
-        );
+        assert!(msg.contains("DLH1929"));
+        assert!(msg.contains("Phase: Cruise"));
+        assert!(msg.contains("Route: ?"));
+        assert!(!msg.contains("adsbexchange"));
+    }
+
+    #[test]
+    fn msg_flights_list_is_compact_but_contains_status_route_and_speed() {
+        let mut flight = status_flight(Some("3C6589"));
+        flight.route = Some(("FRA".to_string(), "MUC".to_string()));
+
+        let msg = msg_flights_list(&[flight]);
+
+        for token in [
+            "Aktive Tracks",
+            "DLH1929",
+            "Cruise",
+            "FL120",
+            "280kt",
+            "FRA→MUC",
+        ] {
+            assert!(msg.contains(token), "missing {token:?} in {msg}");
+        }
+    }
+
+    #[test]
+    fn removal_messages_include_status_and_reason() {
+        let flight = status_flight(Some("3C6589"));
+
+        let lost = msg_tracking_lost(&flight);
+        for token in ["Tracking lost", "DLH1929", "Status", "Grund", "ADS-B"] {
+            assert!(lost.contains(token), "missing {token:?} in {lost}");
+        }
+
+        let pending = msg_pending_expired(&flight);
+        for token in [
+            "automatisch entfernt",
+            "DLH1929",
+            "Status",
+            "Grund",
+            "ADS-B",
+        ] {
+            assert!(pending.contains(token), "missing {token:?} in {pending}");
+        }
     }
 }
