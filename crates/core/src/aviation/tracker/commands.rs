@@ -189,6 +189,7 @@ struct AviationstackLookup {
     checked: bool,
     metadata: Option<AviationstackFlightMetadata>,
     cache_changed: bool,
+    cache_hit: bool,
     failed: bool,
 }
 
@@ -348,6 +349,7 @@ async fn lookup_aviationstack_metadata(
             checked: false,
             metadata: None,
             cache_changed,
+            cache_hit: false,
             failed: false,
         };
     }
@@ -357,6 +359,7 @@ async fn lookup_aviationstack_metadata(
             checked: true,
             metadata,
             cache_changed,
+            cache_hit: true,
             failed: false,
         };
     }
@@ -366,6 +369,7 @@ async fn lookup_aviationstack_metadata(
             checked: false,
             metadata: None,
             cache_changed,
+            cache_hit: false,
             failed: false,
         };
     }
@@ -380,6 +384,7 @@ async fn lookup_aviationstack_metadata(
                 checked: true,
                 metadata,
                 cache_changed: true,
+                cache_hit: false,
                 failed: false,
             }
         }
@@ -389,6 +394,7 @@ async fn lookup_aviationstack_metadata(
                 checked: true,
                 metadata: None,
                 cache_changed,
+                cache_hit: false,
                 failed: true,
             }
         }
@@ -431,6 +437,12 @@ async fn process_latency_sensitive_command(
     match cmd {
         TrackerCommand::Snapshot { reply } => {
             let now = clock.now_utc();
+            append_debug_event(
+                data_dir,
+                now,
+                FlightTrackerDebugEvent::web_command("snapshot", None),
+            )
+            .await;
             let _ = reply.send(build_flight_view(state, now));
             None
         }
@@ -633,6 +645,7 @@ async fn handle_track<T, L>(
             checked: false,
             metadata: None,
             cache_changed: false,
+            cache_hit: false,
             failed: false,
         }
     };
@@ -654,6 +667,7 @@ async fn handle_track<T, L>(
                 resolved_callsign.as_deref(),
                 outcome,
                 metadata.as_ref(),
+                aviationstack_lookup.cache_hit,
             ),
         )
         .await;
@@ -703,9 +717,43 @@ async fn handle_track<T, L>(
         tracking_lost_reported_at: None,
     };
     seed_flight_aliases(&mut flight);
+    let pre_metadata_hex = flight.hex.clone();
+    let pre_metadata_hex_source = flight.hex_source;
 
     if let Some(metadata) = metadata.clone() {
         apply_aviationstack_metadata(&mut flight, metadata);
+    }
+    if pre_metadata_hex != flight.hex || pre_metadata_hex_source != flight.hex_source {
+        append_debug_event(
+            data_dir,
+            now,
+            FlightTrackerDebugEvent::hex_assignment(
+                &flight,
+                pre_metadata_hex.as_deref(),
+                flight.hex.as_deref(),
+                pre_metadata_hex_source
+                    .map(|source| format!("{source:?}"))
+                    .as_deref(),
+                flight
+                    .hex_source
+                    .map(|source| format!("{source:?}"))
+                    .as_deref(),
+            ),
+        )
+        .await;
+    } else if flight.hex_source == Some(HexSource::UserInput) {
+        append_debug_event(
+            data_dir,
+            now,
+            FlightTrackerDebugEvent::hex_assignment(
+                &flight,
+                None,
+                flight.hex.as_deref(),
+                None,
+                Some("UserInput"),
+            ),
+        )
+        .await;
     }
     if duplicate_tracking_exists(
         state,
@@ -732,6 +780,7 @@ async fn handle_track<T, L>(
             Result<Result<Option<NearbyAircraft>, eyre::Report>, tokio::time::error::Elapsed>;
 
         let mut used_hex = should_poll_by_hex(&flight);
+        let mut poll_aliases = Vec::new();
         let mut ac_result: Option<PollResult> = if used_hex {
             if let Some(hex) = flight.hex.clone() {
                 Some(
@@ -744,6 +793,7 @@ async fn handle_track<T, L>(
             }
         } else {
             let candidates = callsign_poll_candidates(&flight);
+            poll_aliases.clone_from(&candidates);
             if candidates.is_empty() {
                 None
             } else {
@@ -758,6 +808,7 @@ async fn handle_track<T, L>(
             && FlightIdentifier::is_valid_icao24_hex(input)
         {
             used_hex = true;
+            poll_aliases.clear();
             ac_result = Some(
                 tokio::time::timeout(POLL_TIMEOUT, aviation_client.get_aircraft_by_hex(input))
                     .await,
@@ -775,6 +826,24 @@ async fn handle_track<T, L>(
                     let Some(confirmation) =
                         target_confirmation_for_aircraft(&flight, &ac, used_hex, now)
                     else {
+                        append_debug_event(
+                            data_dir,
+                            now,
+                            FlightTrackerDebugEvent::adsb_poll_result(
+                                &flight,
+                                super::debug_journal::AdsbPollDebugInput {
+                                    lookup_mode: if used_hex { "hex" } else { "callsign" },
+                                    aliases: &poll_aliases,
+                                    outcome: "hit",
+                                    aircraft: Some(&ac),
+                                    direct_target_confirmed: Some(false),
+                                    sticky_confirmation: None,
+                                    phase_sample_eligible: Some(false),
+                                    last_seen_age_secs: last_seen_age_secs(&flight, now),
+                                },
+                            ),
+                        )
+                        .await;
                         if !keep_pending_on_adsb_absence {
                             sender
                                 .reply(
@@ -826,7 +895,7 @@ async fn handle_track<T, L>(
                         append_debug_event(
                             data_dir,
                             now,
-                            FlightTrackerDebugEvent::track_started(&flight),
+                            FlightTrackerDebugEvent::track_started(&flight, identifier.as_str()),
                         )
                         .await;
                         state.flights.push(flight);
@@ -841,6 +910,24 @@ async fn handle_track<T, L>(
                     };
 
                     let target_confirmed = confirmation.is_target_confirmed();
+                    append_debug_event(
+                        data_dir,
+                        now,
+                        FlightTrackerDebugEvent::adsb_poll_result(
+                            &flight,
+                            super::debug_journal::AdsbPollDebugInput {
+                                lookup_mode: if used_hex { "hex" } else { "callsign" },
+                                aliases: &poll_aliases,
+                                outcome: "hit",
+                                aircraft: Some(&ac),
+                                direct_target_confirmed: Some(target_confirmed),
+                                sticky_confirmation: Some(false),
+                                phase_sample_eligible: Some(target_confirmed),
+                                last_seen_age_secs: last_seen_age_secs(&flight, now),
+                            },
+                        ),
+                    )
+                    .await;
                     // Seed identity + telemetry through the shared core, the one
                     // owner of this mutation (also driven per-cycle by
                     // `advance_flight`). The initial-track ack does not announce,
@@ -854,6 +941,24 @@ async fn handle_track<T, L>(
                     }
                 }
                 Ok(Ok(None)) => {
+                    append_debug_event(
+                        data_dir,
+                        now,
+                        FlightTrackerDebugEvent::adsb_poll_result(
+                            &flight,
+                            super::debug_journal::AdsbPollDebugInput {
+                                lookup_mode: if used_hex { "hex" } else { "callsign" },
+                                aliases: &poll_aliases,
+                                outcome: "miss",
+                                aircraft: None,
+                                direct_target_confirmed: None,
+                                sticky_confirmation: None,
+                                phase_sample_eligible: None,
+                                last_seen_age_secs: last_seen_age_secs(&flight, now),
+                            },
+                        ),
+                    )
+                    .await;
                     if !keep_pending_on_adsb_absence {
                         sender
                             .reply(
@@ -866,6 +971,24 @@ async fn handle_track<T, L>(
                 }
                 Ok(Err(e)) => {
                     error!(error = ?e, identifier = %identifier, "ADS-B lookup failed");
+                    append_debug_event(
+                        data_dir,
+                        now,
+                        FlightTrackerDebugEvent::adsb_poll_result(
+                            &flight,
+                            super::debug_journal::AdsbPollDebugInput {
+                                lookup_mode: if used_hex { "hex" } else { "callsign" },
+                                aliases: &poll_aliases,
+                                outcome: "error",
+                                aircraft: None,
+                                direct_target_confirmed: None,
+                                sticky_confirmation: None,
+                                phase_sample_eligible: None,
+                                last_seen_age_secs: last_seen_age_secs(&flight, now),
+                            },
+                        ),
+                    )
+                    .await;
                     if !keep_pending_on_adsb_absence {
                         sender
                             .reply(
@@ -877,6 +1000,24 @@ async fn handle_track<T, L>(
                     }
                 }
                 Err(_) => {
+                    append_debug_event(
+                        data_dir,
+                        now,
+                        FlightTrackerDebugEvent::adsb_poll_result(
+                            &flight,
+                            super::debug_journal::AdsbPollDebugInput {
+                                lookup_mode: if used_hex { "hex" } else { "callsign" },
+                                aliases: &poll_aliases,
+                                outcome: "timeout",
+                                aircraft: None,
+                                direct_target_confirmed: None,
+                                sticky_confirmation: None,
+                                phase_sample_eligible: None,
+                                last_seen_age_secs: last_seen_age_secs(&flight, now),
+                            },
+                        ),
+                    )
+                    .await;
                     if !keep_pending_on_adsb_absence {
                         sender.reply(reply_to, "Provider-Problem: Timeout | Provider: ADS-B | Grund: Anfrage dauerte zu lange FDM").await;
                         return;
@@ -916,6 +1057,7 @@ async fn handle_track<T, L>(
                 flight.callsign.as_deref(),
                 outcome,
                 lookup.metadata.as_ref(),
+                lookup.cache_hit,
             ),
         )
         .await;
@@ -1023,7 +1165,7 @@ async fn handle_track<T, L>(
     append_debug_event(
         data_dir,
         now,
-        FlightTrackerDebugEvent::track_started(&flight),
+        FlightTrackerDebugEvent::track_started(&flight, identifier.as_str()),
     )
     .await;
     state.flights.push(flight);
@@ -1193,7 +1335,7 @@ where
 
     type PollResult =
         Result<Result<Option<NearbyAircraft>, eyre::Report>, tokio::time::error::Elapsed>;
-    type PollAttempt = (FlightIdentifier, bool, PollResult);
+    type PollAttempt = (FlightIdentifier, bool, Vec<String>, PollResult);
 
     let mut join_set = tokio::task::JoinSet::new();
     let mut fetch_results: Vec<PollAttempt> = Vec::new();
@@ -1245,14 +1387,16 @@ where
                 (
                     id.clone(),
                     true,
+                    Vec::new(),
                     tokio::time::timeout(POLL_TIMEOUT, ac.get_aircraft_by_hex(lookup_hex)).await,
                 )
             } else if callsign_candidates.is_empty() {
-                (id.clone(), false, Ok(Ok(None)))
+                (id.clone(), false, callsign_candidates, Ok(Ok(None)))
             } else {
                 (
                     id.clone(),
                     false,
+                    callsign_candidates.clone(),
                     poll_aircraft_by_callsign_aliases(&ac, &callsign_candidates).await,
                 )
             };
@@ -1318,7 +1462,7 @@ where
         }
     }
 
-    for (identifier, used_hex, ac_result) in fetch_results {
+    for (identifier, used_hex, aliases, ac_result) in fetch_results {
         drain_latency_sensitive_commands(
             &mut cmd_rx,
             state,
@@ -1344,7 +1488,11 @@ where
                 PollOutcome::Timeout
             }
         };
-        let obs = Observation { used_hex, outcome };
+        let obs = Observation {
+            used_hex,
+            aliases,
+            outcome,
+        };
 
         let before = state.flights[idx].clone();
         let update = {
