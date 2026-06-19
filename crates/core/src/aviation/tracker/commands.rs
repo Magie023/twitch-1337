@@ -159,15 +159,28 @@ fn track_started_response(
     flight: &TrackedFlight,
     aviationstack_info: Option<&str>,
     aviationstack_fallback: bool,
+    aviationstack_failed: bool,
 ) -> String {
     let mut response = msg_track_started(flight);
+    match flight.target_confirmation {
+        TargetConfirmation::ConfirmedByCallsign | TargetConfirmation::InferredByAssignedHex => {
+            response.push_str(" | Tracking aktiv und bestätigt");
+        }
+        TargetConfirmation::Pending => {
+            response.push_str(" | Tracking vorgemerkt, noch kein ADS-B-Signal");
+        }
+        TargetConfirmation::AircraftVisible => {
+            response.push_str(" | Tracking aktiv, ADS-B-Signal sichtbar");
+        }
+    }
     if let Some(info) = aviationstack_info {
         response.push_str(" | ");
         response.push_str(info);
     }
-    if aviationstack_fallback {
-        response
-            .push_str(" | Provider-Hinweis: AviationStack down/keine Daten, Status: ADS-B-only");
+    if aviationstack_failed {
+        response.push_str(" | AviationStack nicht verfügbar, ADS-B-only");
+    } else if aviationstack_fallback {
+        response.push_str(" | AviationStack nix, ADS-B-only");
     }
     response
 }
@@ -645,6 +658,7 @@ async fn handle_track<T, L>(
         )
         .await;
     }
+    let aviationstack_failed = aviationstack_lookup.failed;
     let aviationstack_fallback = aviationstack_checked
         && metadata.is_none()
         && matches!(&identifier, FlightIdentifier::Callsign(_));
@@ -807,6 +821,7 @@ async fn handle_track<T, L>(
                             &flight,
                             aviationstack_info.as_deref(),
                             aviationstack_fallback,
+                            aviationstack_failed,
                         );
                         append_debug_event(
                             data_dir,
@@ -1003,6 +1018,7 @@ async fn handle_track<T, L>(
         &flight,
         aviationstack_info.as_deref(),
         aviationstack_fallback,
+        aviationstack_failed,
     );
     append_debug_event(
         data_dir,
