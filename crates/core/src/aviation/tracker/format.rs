@@ -155,6 +155,17 @@ pub(crate) fn msg_aviationstack_info(metadata: &AviationstackFlightMetadata) -> 
     parts.join(" | ")
 }
 
+fn format_adsb_link_suffix(hex: Option<&str>) -> String {
+    present(hex)
+        .map(|hex| {
+            format!(
+                " | https://globe.adsbexchange.com/?icao={}",
+                hex.to_ascii_lowercase()
+            )
+        })
+        .unwrap_or_default()
+}
+
 fn format_flight_prefix(flight: &TrackedFlight) -> String {
     let name = flight
         .callsign
@@ -170,7 +181,11 @@ fn format_flight_prefix(flight: &TrackedFlight) -> String {
 }
 
 pub(crate) fn msg_track_started(flight: &TrackedFlight) -> String {
-    format!("Tracke {} Okayge", format_flight_prefix(flight))
+    format!(
+        "Tracke {} Okayge{}",
+        format_flight_prefix(flight),
+        format_adsb_link_suffix(flight.hex.as_deref())
+    )
 }
 
 pub(crate) fn msg_takeoff(flight: &TrackedFlight) -> String {
@@ -251,6 +266,7 @@ pub(crate) fn msg_pending_expired(flight: &TrackedFlight) -> String {
 }
 
 pub(crate) fn msg_flight_status(flight: &TrackedFlight, now: DateTime<Utc>) -> String {
+    let adsb_link = format_adsb_link_suffix(flight.hex.as_deref());
     let prefix = format_flight_prefix(flight);
     if flight.target_confirmation == super::TargetConfirmation::AircraftVisible {
         let observed = flight
@@ -260,7 +276,7 @@ pub(crate) fn msg_flight_status(flight: &TrackedFlight, now: DateTime<Utc>) -> S
             .unwrap_or_default();
         let elapsed = now.signed_duration_since(flight.tracked_at);
         return format!(
-            "{prefix} | Aircraft sichtbar, Zielflug noch nicht bestätigt{observed} | seit {} getrackt",
+            "{prefix} | Aircraft sichtbar, Zielflug noch nicht bestätigt{observed} | seit {} getrackt{adsb_link}",
             format_duration_hm(elapsed)
         );
     }
@@ -278,7 +294,7 @@ pub(crate) fn msg_flight_status(flight: &TrackedFlight, now: DateTime<Utc>) -> S
     let elapsed = now.signed_duration_since(flight.tracked_at);
     let tracking_time = format!("seit {} getrackt", format_duration_hm(elapsed));
     format!(
-        "{prefix} | {} {alt}{speed}{squawk} | {tracking_time}",
+        "{prefix} | {} {alt}{speed}{squawk} | {tracking_time}{adsb_link}",
         flight.phase
     )
 }
@@ -301,4 +317,64 @@ pub(crate) fn msg_flights_list(flights: &[TrackedFlight]) -> String {
         })
         .collect();
     format!("Getrackte Fl\u{00fc}ge: {}", parts.join(" | "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aviation::tracker::{
+        TargetConfirmation,
+        test_support::{dt, tracked_flight},
+    };
+
+    /// A confirmed, non-visible flight with `hex` swapped in, off the shared
+    /// fixture so this module doesn't carry its own full-field copy.
+    fn status_flight(hex: Option<&str>) -> TrackedFlight {
+        TrackedFlight {
+            hex: hex.map(str::to_string),
+            target_confirmation: TargetConfirmation::ConfirmedByCallsign,
+            ..tracked_flight()
+        }
+    }
+
+    #[test]
+    fn msg_track_started_includes_adsb_link_when_hex_known() {
+        let msg = msg_track_started(&status_flight(Some("3C6589")));
+
+        assert_eq!(
+            msg,
+            "Tracke DLH1929 Okayge | https://globe.adsbexchange.com/?icao=3c6589"
+        );
+    }
+
+    #[test]
+    fn msg_track_started_omits_adsb_link_without_hex() {
+        let msg = msg_track_started(&status_flight(None));
+
+        assert_eq!(msg, "Tracke DLH1929 Okayge");
+    }
+
+    #[test]
+    fn msg_flight_status_includes_adsb_link_when_hex_known() {
+        let now = dt("2026-04-18T12:30:00Z");
+
+        let msg = msg_flight_status(&status_flight(Some("3C6589")), now);
+
+        assert_eq!(
+            msg,
+            "DLH1929 | Cruise FL120 | 280kts | Squawk 1000 | seit 30m getrackt | https://globe.adsbexchange.com/?icao=3c6589"
+        );
+    }
+
+    #[test]
+    fn msg_flight_status_omits_adsb_link_without_hex() {
+        let now = dt("2026-04-18T12:30:00Z");
+
+        let msg = msg_flight_status(&status_flight(None), now);
+
+        assert_eq!(
+            msg,
+            "DLH1929 | Cruise FL120 | 280kts | Squawk 1000 | seit 30m getrackt"
+        );
+    }
 }
