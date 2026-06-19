@@ -65,6 +65,38 @@ async fn flights_empty_state_when_no_tracker() {
 }
 
 #[tokio::test]
+async fn flights_empty_state_when_tracker_returns_no_flights() {
+    install_crypto();
+    let (mut state, _td_pings, _td_mem) = build_state_with_dirs(mod_helix()).await;
+    let (tx, mut rx) = mpsc::channel::<TrackerCommand>(8);
+    state.tracker_tx = Some(Arc::new(tx));
+
+    tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            if let TrackerCommand::Snapshot { reply } = cmd {
+                let _ = reply.send(Vec::new());
+                break;
+            }
+        }
+    });
+
+    let (sid, csrf, _bare) = insert_session(&state, "42", "admin");
+    let req = Request::builder()
+        .uri("/flights")
+        .method(Method::GET)
+        .header(header::COOKIE, cookie_header(&sid, &csrf))
+        .body(Body::empty())
+        .unwrap();
+    let res = app(state).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = body_string(res).await;
+    assert!(
+        html.contains("No flights are being tracked right now"),
+        "should show empty tracked-flights placeholder; got {html}"
+    );
+}
+
+#[tokio::test]
 async fn flights_renders_snapshot_from_tracker() {
     install_crypto();
     let (mut state, _td_pings, _td_mem) = build_state_with_dirs(mod_helix()).await;
@@ -78,8 +110,12 @@ async fn flights_renders_snapshot_from_tracker() {
                 let _ = reply.send(vec![TrackedFlightView {
                     identifier: "DLH123".into(),
                     callsign: Some("DLH123".into()),
+                    hex: Some("3C65A1".into()),
                     owner_login: "alice".into(),
                     phase: "Cruise".into(),
+                    route: Some("FRA → JFK".into()),
+                    target_confirmation: "ConfirmedByCallsign".into(),
+                    hex_source: Some("Adsb".into()),
                     altitude_ft: Some(34000),
                     ground_speed_kts: Some(450.0),
                     last_seen_secs_ago: Some(12),
@@ -107,6 +143,19 @@ async fn flights_renders_snapshot_from_tracker() {
         html.contains("alice"),
         "should render owner login; got {html}"
     );
+    assert!(html.contains("3C65A1"), "should render hex; got {html}");
+    assert!(
+        html.contains("FRA → JFK"),
+        "should render route; got {html}"
+    );
+    assert!(
+        html.contains("ConfirmedByCallsign"),
+        "should render target confirmation; got {html}"
+    );
+    assert!(
+        html.contains("Adsb"),
+        "should render hex source; got {html}"
+    );
 }
 
 #[tokio::test]
@@ -127,11 +176,11 @@ async fn flights_shows_busy_placeholder_when_snapshot_times_out() {
     assert_eq!(res.status(), StatusCode::OK);
     let html = body_string(res).await;
     assert!(
-        html.contains("busy"),
+        html.contains("snapshot timed out"),
         "should distinguish timeout from empty list; got {html}"
     );
     assert!(
-        !html.contains("No flights tracked right now"),
+        !html.contains("No flights are being tracked right now"),
         "timeout must not masquerade as empty list; got {html}"
     );
 }
@@ -151,5 +200,50 @@ async fn flights_unauthenticated_redirects() {
         res.status() == StatusCode::SEE_OTHER || res.status() == StatusCode::UNAUTHORIZED,
         "unauthenticated request must not get 200; got {}",
         res.status()
+    );
+}
+
+#[tokio::test]
+async fn flights_delete_posts_tracker_command_and_redirects_with_flash() {
+    install_crypto();
+    let (mut state, _td_pings, _td_mem) = build_state_with_dirs(mod_helix()).await;
+    let (tx, mut rx) = mpsc::channel::<TrackerCommand>(8);
+    state.tracker_tx = Some(Arc::new(tx));
+
+    tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            if let TrackerCommand::DeleteFromWeb { identifier, reply } = cmd {
+                assert_eq!(identifier, "DLH123");
+                let _ = reply.send(Some("DLH123".to_owned()));
+                break;
+            }
+        }
+    });
+
+    let (sid, csrf, bare_csrf) = insert_session(&state, "42", "admin");
+    let body = format!(
+        "_csrf={csrf}&identifier=DLH123",
+        csrf = urlencoding::encode(&bare_csrf)
+    );
+    let req = Request::builder()
+        .uri("/flights/delete")
+        .method(Method::POST)
+        .header(header::COOKIE, cookie_header(&sid, &csrf))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app(state).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res.headers().get(header::LOCATION).unwrap(), "/flights");
+    let set_cookie = res
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        set_cookie.contains("tw1337_flash"),
+        "delete should set a flash cookie; got {set_cookie}"
     );
 }

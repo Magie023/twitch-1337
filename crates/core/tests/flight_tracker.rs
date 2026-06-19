@@ -1630,38 +1630,42 @@ async fn tracker_answers_dashboard_commands_while_polling() {
         .unwrap()
         .with_timezone(&chrono::Utc);
     let data_dir = tempfile::TempDir::new().unwrap();
+    let make_flight = |callsign: &str, altitude_ft: i64| TrackedFlight {
+        identifier: FlightIdentifier::Callsign(callsign.to_string()),
+        callsign: Some(callsign.to_string()),
+        alias_callsigns: vec![callsign.to_string()],
+        hex: None,
+        hex_source: None,
+        observed_callsign: None,
+        target_confirmation: TargetConfirmation::ConfirmedByCallsign,
+        phase: FlightPhase::Cruise,
+        route: None,
+        aircraft_type: None,
+        altitude_ft: Some(altitude_ft),
+        vertical_rate_fpm: None,
+        ground_speed_kts: Some(450.0),
+        lat: None,
+        lon: None,
+        squawk: None,
+        tracked_by: "alice".to_string(),
+        tracked_at: now,
+        last_seen: Some(now),
+        last_visible_at: Some(now),
+        last_phase_change: None,
+        polls_since_change: 0,
+        takeoff_at: None,
+        aviationstack_checked: false,
+        scheduled_departure_at: None,
+        last_adsb_poll_at: None,
+        divert_consecutive_polls: 0,
+        dest_lat: None,
+        dest_lon: None,
+    };
     let state = FlightTrackerState {
-        flights: vec![TrackedFlight {
-            identifier: FlightIdentifier::Callsign("DLH1234".to_string()),
-            callsign: Some("DLH1234".to_string()),
-            alias_callsigns: vec!["DLH1234".to_string()],
-            hex: None,
-            hex_source: None,
-            observed_callsign: None,
-            target_confirmation: TargetConfirmation::ConfirmedByCallsign,
-            phase: FlightPhase::Cruise,
-            route: None,
-            aircraft_type: None,
-            altitude_ft: Some(35_000),
-            vertical_rate_fpm: None,
-            ground_speed_kts: Some(450.0),
-            lat: None,
-            lon: None,
-            squawk: None,
-            tracked_by: "alice".to_string(),
-            tracked_at: now,
-            last_seen: Some(now),
-            last_visible_at: Some(now),
-            last_phase_change: None,
-            polls_since_change: 0,
-            takeoff_at: None,
-            aviationstack_checked: false,
-            scheduled_departure_at: None,
-            last_adsb_poll_at: None,
-            divert_consecutive_polls: 0,
-            dest_lat: None,
-            dest_lon: None,
-        }],
+        flights: vec![
+            make_flight("DLH1234", 35_000),
+            make_flight("EIN336", 34_000),
+        ],
         flight_info_cache: Vec::new(),
     };
     tokio::fs::write(
@@ -1673,29 +1677,31 @@ async fn tracker_answers_dashboard_commands_while_polling() {
 
     let adsb_mock = wiremock::MockServer::start().await;
     let nominatim_mock = wiremock::MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/callsign/DLH1234"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_millis(1_500))
-                .set_body_json(serde_json::json!({
-                    "ac": [{
-                        "hex": "3C6589",
-                        "flight": "DLH1234",
-                        "alt_baro": 35000,
-                        "gs": 450.0,
-                        "baro_rate": 0,
-                        "lat": 50.0,
-                        "lon": 8.5,
-                        "squawk": "1000"
-                    }],
-                    "ctime": 0,
-                    "now": 0,
-                    "total": 1
-                })),
-        )
-        .mount(&adsb_mock)
-        .await;
+    for callsign in ["DLH1234", "EIN336"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/callsign/{callsign}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1_500))
+                    .set_body_json(serde_json::json!({
+                        "ac": [{
+                            "hex": "3C6589",
+                            "flight": callsign,
+                            "alt_baro": 35000,
+                            "gs": 450.0,
+                            "baro_rate": 0,
+                            "lat": 50.0,
+                            "lon": 8.5,
+                            "squawk": "1000"
+                        }],
+                        "ctime": 0,
+                        "now": 0,
+                        "total": 1
+                    })),
+            )
+            .mount(&adsb_mock)
+            .await;
+    }
 
     let _transport = fake_transport::install().await;
     let client_cfg = ClientConfig::new_simple(StaticLoginCredentials::new(
@@ -1736,12 +1742,15 @@ async fn tracker_answers_dashboard_commands_while_polling() {
         .await
         .expect("snapshot should not wait for ADS-B poll")
         .unwrap();
-    assert_eq!(snapshot.len(), 1);
-    assert_eq!(snapshot[0].identifier, "DLH1234");
+    assert_eq!(snapshot.len(), 2);
+    assert!(snapshot.iter().any(|flight| flight.identifier == "DLH1234"));
+    assert!(snapshot.iter().any(|flight| flight.identifier == "EIN336"));
 
     let (delete_tx, delete_rx) = tokio::sync::oneshot::channel();
     tx.send(TrackerCommand::DeleteFromWeb {
         identifier: "DLH1234".to_string(),
+        requested_by: "tester".to_string(),
+        is_mod: true,
         reply: delete_tx,
     })
     .await
@@ -1958,6 +1967,33 @@ async fn track_iata_query_5xx_still_tries_icao_fallback() {
     assert!(
         ack.contains("FRA") && ack.contains("PMI"),
         "a 5xx on flight_iata=DE1513 should fall through to flight_icao=CFG1513; got: {ack}"
+    );
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
+async fn track_callsign_adsb_5xx_returns_error_without_persisting() {
+    let bot = TestBotBuilder::new().spawn().await;
+
+    Mock::given(method("GET"))
+        .and(path("/callsign/DLH500"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let mut bot = bot;
+    bot.send("alice", "!track DLH500").await;
+    let reply = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(
+        reply.contains("ADS-B Anfrage fehlgeschlagen"),
+        "expected ADS-B 5xx error, got: {reply}"
+    );
+
+    let state_path = bot.data_dir.path().join("flights.ron");
+    assert!(
+        tokio::fs::read_to_string(state_path).await.is_err(),
+        "failed initial ADS-B lookup must not create tracker state"
     );
 
     bot.shutdown().await;
