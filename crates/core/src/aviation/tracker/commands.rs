@@ -159,7 +159,8 @@ fn track_started_response(
         response.push_str(info);
     }
     if aviationstack_fallback {
-        response.push_str(" | AviationStack nix, ADS-B-only");
+        response
+            .push_str(" | Provider-Hinweis: AviationStack down/keine Daten, Status: ADS-B-only");
     }
     response
 }
@@ -532,7 +533,7 @@ async fn handle_track<T, L>(
         sender
             .reply(
                 reply_to,
-                format!("Maximal {MAX_TRACKED_FLIGHTS} Flüge gleichzeitig FDM"),
+                format!("Track-Limit erreicht: maximal {MAX_TRACKED_FLIGHTS} aktive Flüge gleichzeitig FDM"),
             )
             .await;
         return;
@@ -547,7 +548,9 @@ async fn handle_track<T, L>(
         sender
             .reply(
                 reply_to,
-                format!("Du trackst schon {MAX_FLIGHTS_PER_USER} Flüge FDM"),
+                format!(
+                    "Track-Limit erreicht: du trackst bereits {MAX_FLIGHTS_PER_USER} Flüge FDM"
+                ),
             )
             .await;
         return;
@@ -555,7 +558,10 @@ async fn handle_track<T, L>(
 
     if duplicate_tracking_exists(state, &identifier, None, None) {
         sender
-            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} wird bereits getrackt | Status: aktiv FDM"),
+            )
             .await;
         return;
     }
@@ -570,7 +576,10 @@ async fn handle_track<T, L>(
         && duplicate_tracking_exists(state, &identifier, Some(resolved), None)
     {
         sender
-            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} wird bereits getrackt | Status: aktiv FDM"),
+            )
             .await;
         return;
     }
@@ -672,7 +681,10 @@ async fn handle_track<T, L>(
             save_tracker_state(data_dir, state).await;
         }
         sender
-            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} wird bereits getrackt | Status: aktiv FDM"),
+            )
             .await;
         return;
     }
@@ -731,7 +743,7 @@ async fn handle_track<T, L>(
                             sender
                                 .reply(
                                     reply_to,
-                                    format!("{identifier} nicht gefunden im ADS-B FDM"),
+                                    format!("{identifier} nicht gefunden | Provider: ADS-B | Grund: kein passendes Signal FDM"),
                                 )
                                 .await;
                             return;
@@ -809,7 +821,7 @@ async fn handle_track<T, L>(
                         sender
                             .reply(
                                 reply_to,
-                                format!("{identifier} nicht gefunden im ADS-B FDM"),
+                                format!("{identifier} nicht gefunden | Provider: ADS-B | Grund: kein passendes Signal FDM"),
                             )
                             .await;
                         return;
@@ -819,14 +831,17 @@ async fn handle_track<T, L>(
                     error!(error = ?e, identifier = %identifier, "ADS-B lookup failed");
                     if !keep_pending_on_adsb_absence {
                         sender
-                            .reply(reply_to, "ADS-B Anfrage fehlgeschlagen FDM")
+                            .reply(
+                                reply_to,
+                                "Provider-Problem: ADS-B down | Grund: Anfrage fehlgeschlagen FDM",
+                            )
                             .await;
                         return;
                     }
                 }
                 Err(_) => {
                     if !keep_pending_on_adsb_absence {
-                        sender.reply(reply_to, "ADS-B Anfrage Timeout FDM").await;
+                        sender.reply(reply_to, "Provider-Problem: Timeout | Provider: ADS-B | Grund: Anfrage dauerte zu lange FDM").await;
                         return;
                     }
                     warn!(
@@ -879,7 +894,10 @@ async fn handle_track<T, L>(
         flight.hex.as_deref(),
     ) {
         sender
-            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} wird bereits getrackt | Status: aktiv FDM"),
+            )
             .await;
         return;
     }
@@ -996,7 +1014,10 @@ async fn handle_untrack<T, L>(
 {
     let Some(idx) = find_flight_index(&state.flights, identifier) else {
         sender
-            .reply(reply_to, format!("{identifier} nicht gefunden FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} nicht gefunden | Status: kein aktiver Track FDM"),
+            )
             .await;
         return;
     };
@@ -1006,7 +1027,7 @@ async fn handle_untrack<T, L>(
         sender
             .reply(
                 reply_to,
-                "Nur der Tracker oder Mods können das untracking machen FDM",
+                "Keine Berechtigung: nur Tracker oder Mods können diesen Flug entfernen FDM",
             )
             .await;
         return;
@@ -1017,7 +1038,10 @@ async fn handle_untrack<T, L>(
         .unwrap_or_else(|| identifier.to_owned());
 
     sender
-        .reply(reply_to, format!("{name} wird nicht mehr getrackt Okayge"))
+        .reply(
+            reply_to,
+            format!("Untrack entfernt: {name} | Status: nicht mehr getrackt Okayge"),
+        )
         .await;
 }
 
@@ -1059,11 +1083,11 @@ async fn handle_info<T, L>(
     let response = if let Some(metadata) = lookup.metadata {
         msg_aviationstack_info(&metadata)
     } else if lookup.failed {
-        "AviationStack Anfrage fehlgeschlagen FDM".to_string()
+        "Provider-Problem: AviationStack down | Grund: Anfrage fehlgeschlagen FDM".to_string()
     } else if lookup.checked || aviation_client.aviationstack_enabled() {
-        format!("{identifier} nicht bei AviationStack gefunden FDM")
+        format!("{identifier} nicht bei AviationStack gefunden | Grund: keine Provider-Daten FDM")
     } else {
-        "AviationStack nicht konfiguriert FDM".to_string()
+        "Provider-Problem: AviationStack down | Grund: nicht konfiguriert FDM".to_string()
     };
 
     sender.reply(reply_to, response).await;
@@ -1083,7 +1107,7 @@ async fn handle_status<T, L>(
         None => msg_flights_list(&state.flights),
         Some(id) => match find_flight_index(&state.flights, id) {
             Some(idx) => msg_flight_status(&state.flights[idx], clock.now_utc()),
-            None => format!("{id} nicht gefunden FDM"),
+            None => format!("{id} nicht gefunden | Status: kein aktiver Track FDM"),
         },
     };
 
