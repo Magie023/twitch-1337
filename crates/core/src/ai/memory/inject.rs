@@ -562,41 +562,48 @@ mod tests {
         assert_eq!(out, "model=Google Gemma 3 4B id=google/gemma-3-4b-it");
     }
 
+    /// The 8 substitution tokens `substitute` knows about. None may survive in
+    /// a bundled prompt's rendered output — a leak means a typo'd token in the
+    /// template or a renamed var. (`{0,63}` and other literal braces in the
+    /// prompts are not in this set and are left as-is by design.)
+    const KNOWN_TOKENS: [&str; 8] = [
+        "{speaker_username}",
+        "{speaker_display}",
+        "{speaker_user_id}",
+        "{speaker_role}",
+        "{channel}",
+        "{date}",
+        "{model}",
+        "{model_id}",
+    ];
+
+    fn sample_vars() -> SubstitutionVars<'static> {
+        SubstitutionVars {
+            speaker_username: "magie_023",
+            speaker_display: "MagieDisplay",
+            speaker_user_id: "141690010",
+            speaker_role: "regular",
+            channel: "euterheissgetraenk",
+            date: "2026-05-16",
+            model: "Google Gemma 3 4B",
+            model_id: "google/gemma-3-4b-it",
+        }
+    }
+
     #[test]
-    fn bundled_ai_instructions_substitutes_speaker_marker_cleanly() {
-        // Drives the production prompt through substitute() and verifies the
-        // marker line emerges with no leftover `{...}` placeholders.
-        let tmpl = PROMPT_INSTRUCTIONS;
-        let out = substitute(
-            tmpl,
-            SubstitutionVars {
-                speaker_username: "magie_023",
-                speaker_display: "MagieDisplay",
-                speaker_user_id: "141690010",
-                speaker_role: "regular",
-                channel: "euterheissgetraenk",
-                date: "2026-05-16",
-                model: "Google Gemma 3 4B",
-                model_id: "google/gemma-3-4b-it",
-            },
+    fn bundled_ai_instructions_substitutes_cleanly() {
+        // Drive the bundled prompt through substitute(): the speaker/date tokens
+        // it uses must render with real values, and no known token may leak.
+        let out = substitute(PROMPT_INSTRUCTIONS, sample_vars());
+        assert!(
+            out.contains("Nachricht von magie_023"),
+            "speaker_username did not substitute:\n{out}"
         );
         assert!(
-            out.contains(
-                ">>> Antwort auf MagieDisplay (login=magie_023, id=141690010, role=regular):"
-            ),
-            "bundled prompt missing or malformed marker line:\n{out}"
+            out.contains("Aktuelles Datum: 2026-05-16"),
+            "date did not substitute:\n{out}"
         );
-        // No `{token}` placeholders should remain in the output.
-        for tok in [
-            "{speaker_username}",
-            "{speaker_display}",
-            "{speaker_user_id}",
-            "{speaker_role}",
-            "{channel}",
-            "{date}",
-            "{model}",
-            "{model_id}",
-        ] {
+        for tok in KNOWN_TOKENS {
             assert!(
                 !out.contains(tok),
                 "bundled prompt leaked unsubstituted token {tok}:\n{out}"
@@ -606,33 +613,14 @@ mod tests {
 
     #[test]
     fn bundled_system_substitutes_cleanly() {
-        // Mirror the ai_instructions check: drive the bundled system prompt
-        // through substitute() and verify no `{...}` placeholders survive.
-        let tmpl = PROMPT_SYSTEM;
-        let out = substitute(
-            tmpl,
-            SubstitutionVars {
-                speaker_username: "magie_023",
-                speaker_display: "MagieDisplay",
-                speaker_user_id: "141690010",
-                speaker_role: "regular",
-                channel: "euterheissgetraenk",
-                date: "2026-05-16",
-                model: "Google Gemma 3 4B",
-                model_id: "google/gemma-3-4b-it",
-            },
+        // Mirror the ai_instructions check: the system prompt uses {channel} and
+        // {speaker_role}; both must render and no known token may leak.
+        let out = substitute(PROMPT_SYSTEM, sample_vars());
+        assert!(
+            out.contains("#euterheissgetraenk"),
+            "channel did not substitute:\n{out}"
         );
-        assert!(out.contains("model: `Google Gemma 3 4B`"));
-        for tok in [
-            "{speaker_username}",
-            "{speaker_display}",
-            "{speaker_user_id}",
-            "{speaker_role}",
-            "{channel}",
-            "{date}",
-            "{model}",
-            "{model_id}",
-        ] {
+        for tok in KNOWN_TOKENS {
             assert!(
                 !out.contains(tok),
                 "bundled system prompt leaked unsubstituted token {tok}:\n{out}"
