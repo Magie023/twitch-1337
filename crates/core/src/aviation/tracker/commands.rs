@@ -413,8 +413,22 @@ async fn process_latency_sensitive_command(
             let _ = reply.send(build_flight_view(state, now));
             None
         }
-        TrackerCommand::DeleteFromWeb { identifier, reply } => {
-            let removed = remove_flight_at(state, &identifier, data_dir, "web", clock).await;
+        TrackerCommand::DeleteFromWeb {
+            identifier,
+            requested_by,
+            is_mod,
+            reply,
+        } => {
+            let removed = remove_flight_for_request(
+                state,
+                &identifier,
+                &requested_by,
+                is_mod,
+                data_dir,
+                clock,
+            )
+            .await
+            .map(|outcome| outcome.label);
             let _ = reply.send(removed);
             None
         }
@@ -977,10 +991,30 @@ async fn handle_track<T, L>(
     sender.reply(reply_to, response).await;
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "command handler threads shared tracker deps + injected clock"
-)]
+pub(crate) struct UntrackOutcome {
+    pub(crate) label: String,
+}
+
+pub(crate) async fn remove_flight_for_request(
+    state: &mut FlightTrackerState,
+    identifier: &str,
+    requested_by: &str,
+    is_mod: bool,
+    data_dir: &Path,
+    clock: &dyn Clock,
+) -> Option<UntrackOutcome> {
+    let idx = find_flight_index(&state.flights, identifier)?;
+    let flight = &state.flights[idx];
+    if flight.tracked_by != requested_by && !is_mod {
+        return None;
+    }
+
+    let label = remove_flight_at(state, identifier, data_dir, requested_by, clock)
+        .await
+        .unwrap_or_else(|| identifier.to_owned());
+    Some(UntrackOutcome { label })
+}
+
 async fn handle_untrack<T, L>(
     identifier: &str,
     requested_by: &str,
@@ -1012,8 +1046,9 @@ async fn handle_untrack<T, L>(
         return;
     }
 
-    let name = remove_flight_at(state, identifier, data_dir, requested_by, clock)
+    let name = remove_flight_for_request(state, identifier, requested_by, is_mod, data_dir, clock)
         .await
+        .map(|outcome| outcome.label)
         .unwrap_or_else(|| identifier.to_owned());
 
     sender

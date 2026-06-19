@@ -127,6 +127,8 @@ async fn delete(
     }
     let delete_result = tracker_request(&state, |reply| TrackerCommand::DeleteFromWeb {
         identifier: identifier.clone(),
+        requested_by: session.user_login.clone(),
+        is_mod: true,
         reply,
     })
     .await;
