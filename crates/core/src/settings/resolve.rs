@@ -176,6 +176,10 @@ fn resolve_ai(defaults: &AiSettings, o: &overrides::AiOverrides) -> AiSettings {
                 .timeout_secs
                 .unwrap_or(defaults.dreamer.timeout_secs),
             max_rounds: o.dreamer.max_rounds.unwrap_or(defaults.dreamer.max_rounds),
+            max_writes_per_turn: o
+                .dreamer
+                .max_writes_per_turn
+                .unwrap_or(defaults.dreamer.max_writes_per_turn),
         },
         prefill: resolve_prefill(defaults.prefill.as_ref(), &o.prefill),
         web: resolve_web(defaults.web.as_ref(), &o.web),
@@ -486,5 +490,21 @@ mod tests {
         let overrides = overrides::SettingsOverrides::default();
         let r = Settings::resolve(&defaults, &overrides);
         assert!(r.schedules.is_empty());
+    }
+
+    #[test]
+    fn dreamer_write_cap_resolves_default_and_override() {
+        // Empty overrides → compiled default (32).
+        let s = Settings::resolve(
+            &Settings::compiled_defaults(),
+            &overrides::SettingsOverrides::default(),
+        );
+        assert_eq!(s.ai.dreamer.max_writes_per_turn, 32);
+
+        // Explicit override wins.
+        let mut ovr = overrides::SettingsOverrides::default();
+        ovr.ai.dreamer.max_writes_per_turn = Some(50);
+        let s = Settings::resolve(&Settings::compiled_defaults(), &ovr);
+        assert_eq!(s.ai.dreamer.max_writes_per_turn, 50);
     }
 }

@@ -65,6 +65,9 @@ pub struct TestBot {
     /// Shared telemetry store; exposes in-memory schedule fire counts for tests
     /// without requiring on-disk flush.
     pub telemetry: Arc<twitch_1337::schedule::TelemetryStore>,
+    /// Live settings handle. Exposes the overrides applied via `with_settings`
+    /// so that helpers such as `run_ritual_for` read the same config the bot uses.
+    pub settings: twitch_1337::settings::SettingsHandle,
     shutdown: Option<oneshot::Sender<()>>,
     bot_task: Option<JoinHandle<EyreResult<()>>>,
 }
@@ -400,6 +403,7 @@ impl TestBotBuilder {
             irc_connected,
             primary_history_tap,
             telemetry: telemetry_store,
+            settings: settings_handle,
             shutdown: Some(shutdown_tx),
             bot_task: Some(bot_task),
         }
@@ -614,14 +618,15 @@ impl TestBot {
     }
 
     /// Open fresh v2 memory handles on the same `data_dir` and run the
-    /// dreamer ritual for `yesterday`.
+    /// dreamer ritual for `yesterday`. Uses `self.settings` so that any
+    /// `with_settings` overrides applied at build time are visible to the
+    /// ritual (e.g. `ai.dreamer.max_writes_per_turn`).
     pub async fn run_ritual_for(&self, yesterday: chrono::NaiveDate) {
         use twitch_1337::ai::memory::{
             run_ritual, store::MemoryStore as StoreV2, transcript::TranscriptWriter,
         };
 
-        let settings = twitch_1337::settings::test_handle();
-        let store = StoreV2::open(self.data_dir.path(), settings.clone())
+        let store = StoreV2::open(self.data_dir.path(), self.settings.clone())
             .await
             .expect("open store for ritual");
         let transcript = TranscriptWriter::open(store.memories_dir())
@@ -633,7 +638,7 @@ impl TestBot {
             llm_ref,
             &store,
             &transcript,
-            &settings,
+            &self.settings,
             &self.channel,
             yesterday,
         )

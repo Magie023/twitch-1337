@@ -214,6 +214,13 @@ fn validate_ai(ai: &AiSettings, errs: &mut Vec<FieldError>) {
             format!("must be 1..=200 (got {})", ai.dreamer.max_rounds),
         );
     }
+    if !(1..=64).contains(&ai.dreamer.max_writes_per_turn) {
+        err(
+            errs,
+            "ai.dreamer.max_writes_per_turn",
+            format!("must be 1..=64 (got {})", ai.dreamer.max_writes_per_turn),
+        );
+    }
     if ai.dreamer.timeout_secs == 0 {
         err(errs, "ai.dreamer.timeout_secs", "must be > 0".into());
     }
@@ -618,6 +625,32 @@ mod tests {
             channel: "test".into(),
         })
         .expect("2 pins <= max 20 must pass");
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_dreamer_write_cap() {
+        let mut s = Settings::compiled_defaults();
+        s.ai.dreamer.max_writes_per_turn = 0;
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("must fail");
+        assert!(
+            errs.iter()
+                .any(|e| e.field == "ai.dreamer.max_writes_per_turn")
+        );
+
+        s.ai.dreamer.max_writes_per_turn = 65;
+        let errs = s
+            .validate(&ValidationContext {
+                channel: "test".into(),
+            })
+            .expect_err("must fail");
+        assert!(
+            errs.iter()
+                .any(|e| e.field == "ai.dreamer.max_writes_per_turn")
+        );
     }
 
     #[test]

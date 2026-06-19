@@ -96,6 +96,11 @@ pub struct AiDreamer {
     pub run_at: String,
     pub timeout_secs: u64,
     pub max_rounds: usize,
+    /// Per-turn `write_file` quota for the dreamer ritual. Separate from the
+    /// chat-turn cap (`AiBehavior::max_writes_per_turn`): the dreamer rewrites
+    /// SOUL + LORE + many user files in one pass, so it defaults higher (32 vs
+    /// the chat cap's 8). Both are bounded to the same `1..=64` range.
+    pub max_writes_per_turn: usize,
 }
 
 /// Prefill config — `threshold` is `f64` compared as bits to allow `Eq`.
@@ -211,6 +216,7 @@ impl Default for AiDreamer {
             run_at: "04:00".into(),
             timeout_secs: 120,
             max_rounds: 20,
+            max_writes_per_turn: 32,
         }
     }
 }
@@ -319,6 +325,7 @@ mod tests {
         assert_eq!(s.dreamer.run_at, "04:00");
         assert_eq!(s.dreamer.timeout_secs, 120);
         assert_eq!(s.dreamer.max_rounds, 20);
+        assert_eq!(s.dreamer.max_writes_per_turn, 32);
         assert!(s.prefill.is_none());
         assert!(s.web.is_none());
         assert!(s.emotes.is_none());

@@ -104,6 +104,9 @@ pub(super) fn merge_into(into: &mut SettingsOverrides, patch: &SettingsOverrides
     if let Some(v) = patch.ai.dreamer.max_rounds {
         into.ai.dreamer.max_rounds = Some(v);
     }
+    if let Some(v) = patch.ai.dreamer.max_writes_per_turn {
+        into.ai.dreamer.max_writes_per_turn = Some(v);
+    }
     // AI prefill
     if let Some(v) = patch.ai.prefill.enabled {
         into.ai.prefill.enabled = Some(v);

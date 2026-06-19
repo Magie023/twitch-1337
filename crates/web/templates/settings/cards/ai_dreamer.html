@@ -90,5 +90,8 @@
     {% call m::num_row_bounded("ai_dreamer", "ai_dreamer_max_rounds", "max_rounds",
        "Maximum tool rounds the dreamer may take.",
        current.ai.dreamer.max_rounds, defaults.ai.dreamer.max_rounds, "", 1, 128) %}{% endcall %}
+    {% call m::num_row_bounded("ai_dreamer", "ai_dreamer_max_writes_per_turn", "max_writes_per_turn",
+       "Maximum write_file calls the dreamer may make in one nightly pass. Separate from the chat-turn cap.",
+       current.ai.dreamer.max_writes_per_turn, defaults.ai.dreamer.max_writes_per_turn, "", 1, 64) %}{% endcall %}
   </div>
 </section>

@@ -393,6 +393,65 @@ async fn ritual_transcript_injection() {
 }
 
 // ---------------------------------------------------------------------------
+// #202: dreamer uses its own write cap, not the chat-turn cap
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dreamer_uses_its_own_write_cap_not_chat_cap() {
+    // Chat cap tight (1), dreamer cap generous (8). Two dreamer writes must
+    // BOTH land. Pre-fix the dreamer inherited behavior=1 and the second write
+    // was rejected with write_quota_exhausted.
+    let bot = TestBotBuilder::new()
+        .with_ai()
+        .with_settings(|o| {
+            o.ai.behavior.max_writes_per_turn = Some(1);
+            o.ai.dreamer.max_writes_per_turn = Some(8);
+        })
+        .spawn()
+        .await;
+
+    bot.llm.push_tool(ToolChatCompletionResponse::ToolCalls {
+        calls: vec![
+            ToolCall {
+                id: "d1".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({ "path": "SOUL.md", "body": "soul-rewritten-202" }),
+                arguments_parse_error: None,
+            },
+            ToolCall {
+                id: "d2".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({ "path": "LORE.md", "body": "lore-rewritten-202" }),
+                arguments_parse_error: None,
+            },
+        ],
+        reasoning_content: None,
+    });
+    bot.llm
+        .push_tool(ToolChatCompletionResponse::Message("done".into()));
+
+    let yesterday = chrono::NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
+    bot.run_ritual_for(yesterday).await;
+
+    let soul = tokio::fs::read_to_string(bot.memories_dir().join("SOUL.md"))
+        .await
+        .unwrap_or_default();
+    let lore = tokio::fs::read_to_string(bot.memories_dir().join("LORE.md"))
+        .await
+        .unwrap_or_default();
+    assert!(
+        soul.contains("soul-rewritten-202"),
+        "first dreamer write should land"
+    );
+    assert!(
+        lore.contains("lore-rewritten-202"),
+        "second dreamer write should land — dreamer cap=8 must govern, not chat cap=1"
+    );
+
+    bot.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // 11. Ritual dreamer failure — transcript still rotated even on LLM error
 // ---------------------------------------------------------------------------
 

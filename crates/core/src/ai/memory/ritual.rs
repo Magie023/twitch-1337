@@ -49,7 +49,7 @@ pub fn spawn_ritual(
         loop {
             // Re-read settings on each loop iteration. This picks up live edits
             // to dreamer.{enabled, model, reasoning_effort, run_at, timeout_secs,
-            // max_rounds} and behavior.max_writes_per_turn / memory.inject_byte_budget.
+            // max_rounds, max_writes_per_turn} and memory.inject_byte_budget.
             let snap = settings.load();
             let ai = &snap.ai;
             if !ai.dreamer.enabled {
@@ -117,7 +117,7 @@ pub async fn run_ritual(
         .or_else(|| ai.connection.service_tier.clone());
     let timeout_secs = ai.dreamer.timeout_secs;
     let max_rounds = ai.dreamer.max_rounds;
-    let max_writes_per_turn = ai.behavior.max_writes_per_turn;
+    let max_writes_per_turn = ai.dreamer.max_writes_per_turn;
     let inject_byte_budget = ai.memory.inject_byte_budget;
     drop(snap);
 

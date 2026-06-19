@@ -255,6 +255,11 @@ pub(super) fn diff_changes(prior: &Settings, next: &Settings) -> Vec<AuditChange
         prior.ai.dreamer.max_rounds,
         next.ai.dreamer.max_rounds
     );
+    cmp!(
+        "ai.dreamer.max_writes_per_turn",
+        prior.ai.dreamer.max_writes_per_turn,
+        next.ai.dreamer.max_writes_per_turn
+    );
     // AI prefill (toggle-card: diff the whole block as a single key on None<->Some
     // transitions, then leaf-by-leaf when both are Some)
     match (&prior.ai.prefill, &next.ai.prefill) {

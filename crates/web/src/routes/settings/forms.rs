@@ -230,6 +230,8 @@ struct AiDreamerForm {
     ai_dreamer_timeout_secs: Option<u64>,
     #[serde(default)]
     ai_dreamer_max_rounds: Option<usize>,
+    #[serde(default)]
+    ai_dreamer_max_writes_per_turn: Option<usize>,
 }
 
 impl AiDreamerForm {
@@ -246,6 +248,7 @@ impl AiDreamerForm {
             run_at: self.ai_dreamer_run_at,
             timeout_secs: self.ai_dreamer_timeout_secs,
             max_rounds: self.ai_dreamer_max_rounds,
+            max_writes_per_turn: self.ai_dreamer_max_writes_per_turn,
         }
     }
 }
@@ -558,6 +561,7 @@ pub(super) fn overrides_from_save_form(form: SaveForm) -> SettingsOverrides {
                 ai_dreamer_run_at: form.ai_dreamer_run_at,
                 ai_dreamer_timeout_secs: form.ai_dreamer_timeout_secs,
                 ai_dreamer_max_rounds: form.ai_dreamer_max_rounds,
+                ai_dreamer_max_writes_per_turn: form.ai_dreamer_max_writes_per_turn,
             }
             .into_overrides(),
             prefill: AiPrefillForm {

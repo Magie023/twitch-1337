@@ -125,6 +125,8 @@ struct SaveForm {
     ai_dreamer_timeout_secs: Option<u64>,
     #[serde(default)]
     ai_dreamer_max_rounds: Option<usize>,
+    #[serde(default)]
+    ai_dreamer_max_writes_per_turn: Option<usize>,
 
     // ---- AI prefill toggle card ----
     /// Hidden marker so the handler can tell "card visible but unchecked"

@@ -164,6 +164,8 @@ pub struct AiDreamerOverrides {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub max_rounds: Option<usize>,
+    #[serde(default)]
+    pub max_writes_per_turn: Option<usize>,
 }
 
 /// `threshold` is `f64`; manual `PartialEq`/`Eq` use bit comparison.
