@@ -289,7 +289,10 @@ pub(crate) fn advance_flight(
                         "tracking_lost",
                         Some(lost_duration.num_seconds()),
                     ));
-                    update.emits.push(Emit::TrackingLost);
+                    if flight.tracking_lost_reported_at.is_none() {
+                        update.emits.push(Emit::TrackingLost);
+                        flight.tracking_lost_reported_at = Some(now);
+                    }
                     update.removal = Some(RemovalReason::TrackingLost {
                         secs: lost_duration.num_seconds(),
                     });
@@ -299,6 +302,10 @@ pub(crate) fn advance_flight(
                         last_seen_secs_ago = lost_duration.num_seconds(),
                         "Flight not visible via ADS-B"
                     );
+                    if flight.tracking_lost_reported_at.is_none() {
+                        update.emits.push(Emit::TrackingLost);
+                        flight.tracking_lost_reported_at = Some(now);
+                    }
                 }
             }
             return update;
@@ -350,6 +357,7 @@ pub(crate) fn advance_flight(
     // anchors the tracking-lost removal timer, separate from `last_seen`,
     // which only moves on direct target confirmation below.
     flight.last_visible_at = Some(now);
+    flight.tracking_lost_reported_at = None;
 
     let direct_target_confirmed = raw_confirmation.is_target_confirmed();
     let sticky_confirmation =
@@ -559,6 +567,7 @@ mod tests {
             divert_consecutive_polls: 0,
             dest_lat: None,
             dest_lon: None,
+            tracking_lost_reported_at: None,
         }
     }
 
@@ -672,10 +681,24 @@ mod tests {
     fn miss_within_grace_window_keeps_flight() {
         let mut f = tracked_flight();
         f.last_visible_at = Some(dt("2026-04-18T12:00:00Z"));
-        // 5 min later: past lost-threshold (300 s) but well under removal (1800 s)
-        let upd = advance_flight(&mut f, &miss(true), dt("2026-04-18T12:05:00Z"));
+        // Just under the lost threshold (300 s).
+        let upd = advance_flight(&mut f, &miss(true), dt("2026-04-18T12:04:59Z"));
         assert_eq!(upd.removal, None);
         assert!(upd.emits.is_empty());
+    }
+
+    #[test]
+    fn miss_past_lost_threshold_emits_tracking_lost_once_without_removal() {
+        let mut f = tracked_flight();
+        f.last_visible_at = Some(dt("2026-04-18T12:00:00Z"));
+
+        let first = advance_flight(&mut f, &miss(true), dt("2026-04-18T12:05:00Z"));
+        let second = advance_flight(&mut f, &miss(true), dt("2026-04-18T12:06:00Z"));
+
+        assert_eq!(first.removal, None);
+        assert_eq!(first.emits, vec![Emit::TrackingLost]);
+        assert_eq!(second.removal, None);
+        assert!(second.emits.is_empty(), "got: {:?}", second.emits);
     }
 
     #[test]
@@ -793,6 +816,103 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ground_to_takeoff_emits_takeoff_for_climbing_aircraft() {
+        let mut f = tracked_flight();
+        f.target_confirmation = TargetConfirmation::ConfirmedByCallsign;
+        f.phase = FlightPhase::Ground;
+
+        let mut ac = aircraft();
+        ac.flight = Some("DLH1234".to_string());
+        ac.alt_baro = Some(AltBaro::Feet(1_200));
+        ac.baro_rate = Some(1_800);
+        ac.gs = Some(160.0);
+
+        let upd = advance_flight(&mut f, &hit(ac, false), dt("2026-04-18T12:10:00Z"));
+
+        assert_eq!(f.phase, FlightPhase::Takeoff);
+        assert_eq!(upd.emits, vec![Emit::Takeoff]);
+    }
+
+    #[test]
+    fn climb_to_cruise_emits_cruise_when_altitude_is_stable_and_fast() {
+        let mut f = tracked_flight();
+        f.target_confirmation = TargetConfirmation::ConfirmedByCallsign;
+        f.phase = FlightPhase::Climb;
+        f.polls_since_change = crate::aviation::tracker::phase::CRUISE_STABLE_POLLS;
+
+        let mut ac = aircraft();
+        ac.flight = Some("DLH1234".to_string());
+        ac.alt_baro = Some(AltBaro::Feet(34_000));
+        ac.baro_rate = Some(50);
+        ac.gs = Some(455.0);
+
+        let upd = advance_flight(&mut f, &hit(ac, false), dt("2026-04-18T12:30:00Z"));
+
+        assert_eq!(f.phase, FlightPhase::Cruise);
+        assert_eq!(upd.emits, vec![Emit::Cruise]);
+    }
+
+    #[test]
+    fn cruise_to_descent_emits_descent_for_negative_vertical_rate() {
+        let mut f = tracked_flight();
+        f.target_confirmation = TargetConfirmation::ConfirmedByCallsign;
+        f.phase = FlightPhase::Cruise;
+
+        let mut ac = aircraft();
+        ac.flight = Some("DLH1234".to_string());
+        ac.alt_baro = Some(AltBaro::Feet(28_000));
+        ac.baro_rate = Some(-1_200);
+
+        let upd = advance_flight(&mut f, &hit(ac, false), dt("2026-04-18T13:00:00Z"));
+
+        assert_eq!(f.phase, FlightPhase::Descent);
+        assert_eq!(upd.emits, vec![Emit::Descent]);
+    }
+
+    #[test]
+    fn descent_to_approach_emits_approach_near_destination_with_coordinates() {
+        let mut f = tracked_flight();
+        f.target_confirmation = TargetConfirmation::ConfirmedByCallsign;
+        f.phase = FlightPhase::Descent;
+        f.dest_lat = Some(48.3538);
+        f.dest_lon = Some(11.7861);
+        f.lat = Some(48.8);
+        f.lon = Some(11.4);
+
+        let mut ac = aircraft();
+        ac.flight = Some("DLH1234".to_string());
+        ac.alt_baro = Some(AltBaro::Feet(4_000));
+        ac.baro_rate = Some(-900);
+        ac.lat = Some(48.36);
+        ac.lon = Some(11.79);
+
+        let upd = advance_flight(&mut f, &hit(ac, false), dt("2026-04-18T13:20:00Z"));
+
+        assert_eq!(f.phase, FlightPhase::Approach);
+        assert!(upd.emits.contains(&Emit::Approach), "got: {:?}", upd.emits);
+    }
+
+    #[test]
+    fn approach_to_ground_after_touchdown_emits_landing_and_resets_phase() {
+        let mut f = tracked_flight();
+        f.target_confirmation = TargetConfirmation::ConfirmedByCallsign;
+        f.phase = FlightPhase::Approach;
+        f.takeoff_at = Some(dt("2026-04-18T12:10:00Z"));
+
+        let upd = advance_flight(
+            &mut f,
+            &hit(aircraft_on_ground(), false),
+            dt("2026-04-18T14:00:00Z"),
+        );
+
+        assert_eq!(f.phase, FlightPhase::Ground);
+        assert!(matches!(
+            upd.emits.as_slice(),
+            [Emit::Landing { takeoff_at }] if *takeoff_at == Some(dt("2026-04-18T12:10:00Z"))
+        ));
+    }
+
     // ── Task 4 tests ─────────────────────────────────────────────────────────
 
     #[test]
@@ -892,6 +1012,36 @@ mod tests {
             emitted,
             "expected PossibleDivert after sustained off-heading polls"
         );
+    }
+
+    #[test]
+    fn diversion_suspected_only_after_consecutive_poll_threshold() {
+        let mut f = tracked_flight();
+        f.target_confirmation = TargetConfirmation::ConfirmedByCallsign;
+        f.phase = FlightPhase::Descent;
+        f.dest_lat = Some(48.35);
+        f.dest_lon = Some(11.78);
+        f.lat = Some(51.5);
+        f.lon = Some(13.0);
+
+        for i in 0..crate::aviation::tracker::DIVERT_CONSECUTIVE_POLLS {
+            let mut ac = aircraft();
+            ac.flight = Some("DLH1234".to_string());
+            ac.alt_baro = Some(AltBaro::Feet(8_000));
+            ac.baro_rate = Some(-1_500);
+            ac.lat = Some(52.0 + f64::from(i) * 0.5);
+            ac.lon = Some(13.0);
+
+            let upd = advance_flight(&mut f, &hit(ac, false), dt("2026-04-18T12:05:00Z"));
+            let emitted = upd.emits.contains(&Emit::PossibleDivert);
+            assert_eq!(
+                emitted,
+                i + 1 == crate::aviation::tracker::DIVERT_CONSECUTIVE_POLLS,
+                "poll {} emits {:?}",
+                i + 1,
+                upd.emits
+            );
+        }
     }
 
     // ── Follow-up tests: untested advance_flight branches ────────────────────
@@ -1004,6 +1154,60 @@ mod tests {
             )),
             "expected SquawkEmergency(7700, {expected_meaning:?}), got: {:?}",
             upd.emits
+        );
+    }
+
+    #[test]
+    fn emergency_squawk_emits_once_per_relevant_change() {
+        let mut f = tracked_flight();
+        f.target_confirmation = TargetConfirmation::ConfirmedByCallsign;
+        f.phase = FlightPhase::Cruise;
+        f.squawk = Some("1000".to_string());
+
+        let mut first_ac = aircraft();
+        first_ac.flight = Some("DLH1234".to_string());
+        first_ac.squawk = Some("7700".to_string());
+        first_ac.alt_baro = Some(AltBaro::Feet(28_000));
+        first_ac.baro_rate = Some(0);
+        let first = advance_flight(&mut f, &hit(first_ac, false), dt("2026-04-18T12:02:00Z"));
+
+        let mut repeated_ac = aircraft();
+        repeated_ac.flight = Some("DLH1234".to_string());
+        repeated_ac.squawk = Some("7700".to_string());
+        repeated_ac.alt_baro = Some(AltBaro::Feet(28_000));
+        repeated_ac.baro_rate = Some(0);
+        let repeated = advance_flight(&mut f, &hit(repeated_ac, false), dt("2026-04-18T12:03:00Z"));
+
+        let mut changed_ac = aircraft();
+        changed_ac.flight = Some("DLH1234".to_string());
+        changed_ac.squawk = Some("7600".to_string());
+        changed_ac.alt_baro = Some(AltBaro::Feet(28_000));
+        changed_ac.baro_rate = Some(0);
+        let changed = advance_flight(&mut f, &hit(changed_ac, false), dt("2026-04-18T12:04:00Z"));
+
+        assert_eq!(
+            first
+                .emits
+                .iter()
+                .filter(|emit| matches!(emit, Emit::SquawkEmergency { code, .. } if code == "7700"))
+                .count(),
+            1
+        );
+        assert!(
+            !repeated
+                .emits
+                .iter()
+                .any(|emit| matches!(emit, Emit::SquawkEmergency { .. })),
+            "got: {:?}",
+            repeated.emits
+        );
+        assert_eq!(
+            changed
+                .emits
+                .iter()
+                .filter(|emit| matches!(emit, Emit::SquawkEmergency { code, .. } if code == "7600"))
+                .count(),
+            1
         );
     }
 

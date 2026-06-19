@@ -211,6 +211,8 @@ pub struct TrackedFlight {
     pub dest_lat: Option<f64>,
     #[serde(default)]
     pub dest_lon: Option<f64>,
+    #[serde(default)]
+    pub tracking_lost_reported_at: Option<DateTime<Utc>>,
 }
 
 /// Persisted AviationStack lookup result shared by `!track` and `!info`.
@@ -363,6 +365,7 @@ mod tests {
             divert_consecutive_polls: 0,
             dest_lat: None,
             dest_lon: None,
+            tracking_lost_reported_at: None,
         }
     }
 
