@@ -478,7 +478,10 @@ mod tests {
             adsb_aggregators,
             "http://adsbdb.test".to_string(),
             "http://nominatim.test".to_string(),
-            reqwest::Client::new(),
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("test client builds"),
         )
     }
 
@@ -723,11 +726,21 @@ mod tests {
 
     #[test]
     fn merge_keeps_hexless_aircraft() {
+        let mut hexless_a = ac(None, Some(1.0), Some(-10.0));
+        hexless_a.flight = Some("HEXLESS_A".to_owned());
+        let mut hexless_b = ac(None, Some(1.0), Some(-10.0));
+        hexless_b.flight = Some("HEXLESS_B".to_owned());
+
         let merged = merge_aircraft(vec![vec![
             ac(Some("aaa111"), Some(1.0), Some(-10.0)),
-            ac(None, Some(1.0), Some(-10.0)),
+            hexless_a,
+            hexless_b,
         ]]);
-        assert_eq!(merged.len(), 2);
+
+        let flights: Vec<_> = merged.iter().filter_map(|a| a.flight.as_deref()).collect();
+        assert_eq!(merged.len(), 3);
+        assert!(flights.contains(&"HEXLESS_A"));
+        assert!(flights.contains(&"HEXLESS_B"));
     }
 
     #[tokio::test]
@@ -956,6 +969,43 @@ mod tests {
             server.received_requests().await.unwrap().len(),
             ERROR_STREAK_PARK as usize,
             "non-403 4xx parks the backend after the streak threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn merged_query_streak_parks_backend_on_retryable_5xx() {
+        let (retrying, healthy) = tokio::join!(MockServer::start(), MockServer::start());
+        Mock::given(method("GET"))
+            .and(path("/hex/3c6589"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&retrying)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/hex/3c6589"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(aircraft_response("OK")))
+            .mount(&healthy)
+            .await;
+
+        let client = test_client_with_aggregators(vec![
+            AdsbAggregator::readsb_v2("retrying", retrying.uri()),
+            AdsbAggregator::readsb_v2("healthy", healthy.uri()),
+        ])
+        .with_adsb_cooldown(Duration::from_secs(60));
+
+        for _ in 0..(ERROR_STREAK_PARK + 1) {
+            let aircraft = client.get_aircraft_by_hex("3c6589").await.unwrap().unwrap();
+            assert_eq!(aircraft.flight.as_deref(), Some("OK"));
+        }
+
+        assert_eq!(
+            retrying.received_requests().await.unwrap().len(),
+            ERROR_STREAK_PARK as usize,
+            "retryable 5xx parks the failing backend after the streak threshold"
+        );
+        assert_eq!(
+            healthy.received_requests().await.unwrap().len(),
+            ERROR_STREAK_PARK as usize + 1,
+            "healthy backend remains live after its peer is parked"
         );
     }
 
