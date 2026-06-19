@@ -78,10 +78,33 @@ pub struct OAuthCtx {
     /// adapter `oauth_http_call` translates between the workspace reqwest
     /// and oauth2's `AsyncHttpClient` blanket impl over `Fn(HttpRequest)`.
     pub http: reqwest::Client,
+    /// Base URL for Helix calls made during the OAuth callback (`/helix/users`,
+    /// `/helix/moderation/channels`). Production uses `https://api.twitch.tv`;
+    /// integration tests point this at a wiremock server.
+    pub helix_api_base: String,
 }
 
 impl OAuthCtx {
     pub fn new(client_id: &str, client_secret: &SecretString, public_url: &str) -> Result<Self> {
+        Self::with_endpoints(
+            client_id,
+            client_secret,
+            public_url,
+            "https://id.twitch.tv/oauth2/token",
+            "https://api.twitch.tv",
+        )
+    }
+
+    /// Build an OAuth context with caller-supplied token and Helix base URLs.
+    /// Integration tests pass a wiremock URI for both so the callback's
+    /// outbound HTTP stays on-loopback.
+    pub fn with_endpoints(
+        client_id: &str,
+        client_secret: &SecretString,
+        public_url: &str,
+        token_url: &str,
+        helix_api_base: &str,
+    ) -> Result<Self> {
         let redirect = format!("{}/auth/callback", public_url.trim_end_matches('/'));
         // Twitch's token endpoint only reads `client_id` / `client_secret` from
         // the form body and ignores HTTP Basic auth, so override oauth2 v5's
@@ -92,14 +115,18 @@ impl OAuthCtx {
             .set_auth_uri(AuthUrl::new(
                 "https://id.twitch.tv/oauth2/authorize".into(),
             )?)
-            .set_token_uri(TokenUrl::new("https://id.twitch.tv/oauth2/token".into())?)
+            .set_token_uri(TokenUrl::new(token_url.into())?)
             .set_redirect_uri(RedirectUrl::new(redirect)?)
             .set_auth_type(AuthType::RequestBody);
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .wrap_err("oauth http client")?;
-        Ok(Self { basic, http })
+        Ok(Self {
+            basic,
+            http,
+            helix_api_base: helix_api_base.trim_end_matches('/').to_owned(),
+        })
     }
 }
 
@@ -438,10 +465,11 @@ async fn fetch_caller_user(
     struct Resp {
         data: Vec<crate::helix::HelixUser>,
     }
+    let users_url = format!("{}/helix/users", state.oauth.helix_api_base);
     let resp = state
         .oauth
         .http
-        .get("https://api.twitch.tv/helix/users")
+        .get(users_url)
         .bearer_auth(access_token)
         .header("Client-Id", state.client_id.expose_secret())
         .send()

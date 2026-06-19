@@ -91,6 +91,28 @@ pub async fn build_state(helix: Arc<dyn HelixClient>) -> WebState {
     state
 }
 
+/// Like [`build_state`] but points the OAuth token + Helix callback endpoints
+/// at `upstream_base` (a wiremock URI) so `/auth/callback` integration tests
+/// can stub Twitch without touching the live API.
+pub async fn build_state_with_oauth_upstream(
+    helix: Arc<dyn HelixClient>,
+    upstream_base: &str,
+) -> WebState {
+    let mut state = build_state(helix).await;
+    let upstream = upstream_base.trim_end_matches('/');
+    state.oauth = Arc::new(
+        OAuthCtx::with_endpoints(
+            "test-client-id",
+            &SecretString::new("test-secret".to_owned().into()),
+            &state.config.public_url,
+            &format!("{upstream}/oauth2/token"),
+            upstream,
+        )
+        .expect("test oauth"),
+    );
+    state
+}
+
 /// Variant that returns the ping data dir so callers can keep it alive while
 /// exercising persistent ping CRUD paths. Memory data dir is dropped — use
 /// [`build_state_with_dirs`] when both are needed.

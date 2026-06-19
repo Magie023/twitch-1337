@@ -71,7 +71,7 @@ async fn is_moderator_with_user_token(
 ) -> eyre::Result<bool> {
     crate::helix::user_moderates_channel(
         &state.oauth.http,
-        "https://api.twitch.tv",
+        &state.oauth.helix_api_base,
         state.client_id.expose_secret(),
         access_token,
         user_id,
