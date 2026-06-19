@@ -140,22 +140,28 @@ impl FlightTrackerDebugEvent {
                 "aircraft_type": flight.aircraft_type,
             }))
     }
-    pub(crate) fn track_started(flight: &TrackedFlight) -> Self {
+    pub(crate) fn track_started(flight: &TrackedFlight, original_identifier: &str) -> Self {
         // `for_flight` already emits route/scheduled_departure_at/aircraft_type.
-        Self::for_flight("track_started", flight)
-            .payload(json!({ "aviationstack_checked": flight.aviationstack_checked }))
+        Self::for_flight("track_started", flight).payload(json!({
+            "original_identifier": original_identifier,
+            "normalized_identifier": flight.identifier.as_str(),
+            "user": flight.tracked_by,
+            "aviationstack_checked": flight.aviationstack_checked,
+        }))
     }
     pub(crate) fn aviationstack_metadata(
         identifier: &FlightIdentifier,
         callsign: Option<&str>,
         outcome: DebugHttpOutcome,
         metadata: Option<&AviationstackFlightMetadata>,
+        cache_hit: bool,
     ) -> Self {
         Self::new("aviationstack_metadata", identifier.as_str())
             .callsign_opt(callsign)
             .payload(json!({
                 "query": { "identifier": identifier.as_str(), "callsign": callsign },
                 "http": outcome,
+                "cache_hit": cache_hit,
                 "metadata": metadata.map(metadata_summary),
             }))
     }
@@ -179,6 +185,7 @@ impl FlightTrackerDebugEvent {
     pub(crate) fn adsb_poll_result(flight: &TrackedFlight, input: AdsbPollDebugInput<'_>) -> Self {
         Self::for_flight("adsb_poll_result", flight).payload(json!({
             "lookup_mode": input.lookup_mode,
+            "aliases": input.aliases,
             "outcome": input.outcome,
             "selected_aircraft": input.aircraft.map(aircraft_summary),
             "direct_target_confirmed": input.direct_target_confirmed,
@@ -217,12 +224,45 @@ impl FlightTrackerDebugEvent {
             "alert_emitted": input.alert_emitted,
         }))
     }
+    pub(crate) fn target_confirmation_transition(
+        flight: &TrackedFlight,
+        old_confirmation: &str,
+        new_confirmation: &str,
+    ) -> Self {
+        Self::for_flight("target_confirmation_transition", flight).payload(json!({
+            "old_target_confirmation": old_confirmation,
+            "new_target_confirmation": new_confirmation,
+        }))
+    }
+    pub(crate) fn hex_assignment(
+        flight: &TrackedFlight,
+        old_hex: Option<&str>,
+        new_hex: Option<&str>,
+        old_source: Option<&str>,
+        new_source: Option<&str>,
+    ) -> Self {
+        Self::for_flight("hex_assignment", flight).payload(json!({
+            "old_hex": old_hex,
+            "new_hex": new_hex,
+            "old_hex_source": old_source,
+            "new_hex_source": new_source,
+        }))
+    }
+    pub(crate) fn web_command(command: &str, identifier: Option<&str>) -> Self {
+        Self::new("web_command", identifier.unwrap_or("<snapshot>"))
+            .payload(json!({ "command": command, "identifier": identifier }))
+    }
     pub(crate) fn tracking_removal(
         flight: &TrackedFlight,
         reason: &str,
         last_seen_age_secs: Option<i64>,
     ) -> Self {
-        Self::for_flight("tracking_removal", flight).payload(json!({ "reason": reason, "last_seen_age_secs": last_seen_age_secs, "route": route_summary(flight) }))
+        Self::for_flight("tracking_removal", flight).payload(json!({
+            "reason": reason,
+            "age_secs": last_seen_age_secs,
+            "last_seen_age_secs": last_seen_age_secs,
+            "route": route_summary(flight)
+        }))
     }
     pub(crate) fn callsign(mut self, callsign: impl Into<String>) -> Self {
         self.callsign = Some(callsign.into());
@@ -266,6 +306,7 @@ impl FlightTrackerDebugEvent {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AdsbPollDebugInput<'a> {
     pub lookup_mode: &'a str,
+    pub aliases: &'a [String],
     pub outcome: &'a str,
     pub aircraft: Option<&'a NearbyAircraft>,
     pub direct_target_confirmed: Option<bool>,

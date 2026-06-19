@@ -37,6 +37,7 @@ pub(crate) enum PollOutcome {
 #[derive(Debug)]
 pub(crate) struct Observation {
     pub used_hex: bool,
+    pub aliases: Vec<String>,
     pub outcome: PollOutcome,
 }
 
@@ -263,6 +264,7 @@ pub(crate) fn advance_flight(
                 flight,
                 AdsbPollDebugInput {
                     lookup_mode: if obs.used_hex { "hex" } else { "callsign" },
+                    aliases: &obs.aliases,
                     outcome: "miss",
                     aircraft: None,
                     direct_target_confirmed: None,
@@ -308,6 +310,7 @@ pub(crate) fn advance_flight(
                 flight,
                 AdsbPollDebugInput {
                     lookup_mode: if obs.used_hex { "hex" } else { "callsign" },
+                    aliases: &obs.aliases,
                     outcome: "error",
                     aircraft: None,
                     direct_target_confirmed: None,
@@ -323,6 +326,7 @@ pub(crate) fn advance_flight(
                 flight,
                 AdsbPollDebugInput {
                     lookup_mode: if obs.used_hex { "hex" } else { "callsign" },
+                    aliases: &obs.aliases,
                     outcome: "timeout",
                     aircraft: None,
                     direct_target_confirmed: None,
@@ -366,6 +370,7 @@ pub(crate) fn advance_flight(
         flight,
         AdsbPollDebugInput {
             lookup_mode: if obs.used_hex { "hex" } else { "callsign" },
+            aliases: &obs.aliases,
             outcome: "hit",
             aircraft: Some(ac),
             direct_target_confirmed: Some(direct_target_confirmed),
@@ -384,11 +389,38 @@ pub(crate) fn advance_flight(
     let prev_lat = flight.lat;
     let prev_lon = flight.lon;
     let prev_squawk = flight.squawk.clone();
+    let old_target_confirmation = flight.target_confirmation;
+    let old_hex = flight.hex.clone();
+    let old_hex_source = flight.hex_source;
 
     if let Some(cs) = apply_observed_aircraft(flight, ac, confirmation, direct_target_confirmed)
         && flight.route.is_none()
     {
         update.followups.push(Followup::FetchRoute { callsign: cs });
+    }
+
+    if old_target_confirmation != flight.target_confirmation {
+        update
+            .debug
+            .push(FlightTrackerDebugEvent::target_confirmation_transition(
+                flight,
+                &format!("{old_target_confirmation:?}"),
+                &format!("{:?}", flight.target_confirmation),
+            ));
+    }
+    if old_hex != flight.hex || old_hex_source != flight.hex_source {
+        update.debug.push(FlightTrackerDebugEvent::hex_assignment(
+            flight,
+            old_hex.as_deref(),
+            flight.hex.as_deref(),
+            old_hex_source
+                .map(|source| format!("{source:?}"))
+                .as_deref(),
+            flight
+                .hex_source
+                .map(|source| format!("{source:?}"))
+                .as_deref(),
+        ));
     }
 
     if let Some(new_squawk) = &ac.squawk {
@@ -584,6 +616,7 @@ mod tests {
     fn hit(ac: NearbyAircraft, used_hex: bool) -> Observation {
         Observation {
             used_hex,
+            aliases: Vec::new(),
             outcome: PollOutcome::Hit(Box::new(ac)),
         }
     }
@@ -613,6 +646,7 @@ mod tests {
     fn miss(used_hex: bool) -> Observation {
         Observation {
             used_hex,
+            aliases: Vec::new(),
             outcome: PollOutcome::Miss,
         }
     }
@@ -910,6 +944,7 @@ mod tests {
         let now = dt("2026-04-18T12:00:00Z");
         let obs = Observation {
             used_hex: true,
+            aliases: Vec::new(),
             outcome: PollOutcome::Error,
         };
         let upd = advance_flight(&mut f, &obs, now);
@@ -949,6 +984,7 @@ mod tests {
         let now = dt("2026-04-18T12:01:00Z");
         let obs = Observation {
             used_hex: false,
+            aliases: Vec::new(),
             outcome: PollOutcome::Timeout,
         };
         let upd = advance_flight(&mut f, &obs, now);

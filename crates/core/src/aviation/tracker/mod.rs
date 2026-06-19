@@ -963,7 +963,7 @@ mod tests {
         append_debug_event(
             dir.path(),
             now,
-            &FlightTrackerDebugEvent::track_started(&tracked_flight()),
+            &FlightTrackerDebugEvent::track_started(&tracked_flight(), "DLH1234"),
         )
         .await;
 
@@ -991,6 +991,7 @@ mod tests {
             Some("DLH1234"),
             DebugHttpOutcome::client_response("aviationstack", "flight_metadata", 403),
             None,
+            false,
         );
 
         let json = serde_json::to_string(&event).unwrap();
