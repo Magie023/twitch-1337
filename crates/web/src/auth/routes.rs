@@ -246,7 +246,7 @@ async fn auth_start(
     if let Some(path) = params.next.as_deref()
         && crate::error::is_safe_redirect(path)
     {
-        cookies.add(
+        cookies.signed(&state.signed_key).add(
             Cookie::build((NEXT_COOKIE, path.to_owned()))
                 .http_only(true)
                 .secure(true)
@@ -380,6 +380,7 @@ async fn callback(
     issue_session_cookies(&cookies, &state.signed_key, sid, &csrf_value, true);
 
     let next_path = cookies
+        .signed(&state.signed_key)
         .get(NEXT_COOKIE)
         .map(|c| c.value().to_owned())
         .filter(|p| crate::error::is_safe_redirect(p))
