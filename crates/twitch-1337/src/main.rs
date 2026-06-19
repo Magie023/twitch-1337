@@ -416,6 +416,9 @@ async fn build_web_spawner(
         );
     }
 
+    let memory_audit = Arc::new(twitch_1337::settings::FileAuditLog::new(
+        get_data_dir().join("memory_audit.log"),
+    ));
     let state = twitch_1337_web::WebState {
         sessions,
         helix: helix as Arc<dyn twitch_1337_web::helix::HelixClient>,
@@ -428,6 +431,7 @@ async fn build_web_spawner(
         oauth,
         ping_actor,
         memory_store,
+        memory_audit,
         signed_key,
         leaderboard,
         tracker_tx,

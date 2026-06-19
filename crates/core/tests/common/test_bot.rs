@@ -287,7 +287,6 @@ impl TestBotBuilder {
         )
         .await
         .expect("open memory store");
-
         // Build the telemetry store once; share the Arc with Services, web, and TestBot.
         let telemetry_store = twitch_1337::schedule::TelemetryStore::open(data_dir.path());
 
@@ -764,6 +763,9 @@ fn build_test_web_state(
         session_secret: config.web.session_secret.clone(),
     });
     let signed_key = tower_cookies::Key::from(&[0x42u8; 64]);
+    let memory_audit = Arc::new(twitch_1337::settings::FileAuditLog::new(
+        memory_store.root().join("memory_audit.log"),
+    ));
     twitch_1337_web::WebState {
         sessions,
         helix: Arc::new(DenyHelix),
@@ -776,6 +778,7 @@ fn build_test_web_state(
         oauth,
         ping_actor,
         memory_store,
+        memory_audit,
         signed_key,
         leaderboard: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         tracker_tx: None,

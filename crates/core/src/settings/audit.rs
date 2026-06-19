@@ -45,10 +45,11 @@ impl FileAuditLog {
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
         Self { path: path.into() }
     }
-}
 
-impl AuditLog for FileAuditLog {
-    fn append(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+    /// Append any serializable value as one JSON line. Shared by the settings
+    /// `AuditEntry` trait impl below and the web memory-audit entry, so both
+    /// audit logs use the identical create+append+sync writer.
+    pub fn append_serializable<S: serde::Serialize>(&self, entry: &S) -> Result<(), AuditError> {
         use std::io::Write as _;
         let line = serde_json::to_string(entry)?;
         let mut f = std::fs::OpenOptions::new()
@@ -58,6 +59,12 @@ impl AuditLog for FileAuditLog {
         writeln!(f, "{line}")?;
         f.sync_all()?;
         Ok(())
+    }
+}
+
+impl AuditLog for FileAuditLog {
+    fn append(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+        self.append_serializable(entry)
     }
 }
 
@@ -618,5 +625,32 @@ mod tests {
         assert!(keys.contains(&"schedules.keep"), "got {keys:?}");
         assert!(keys.contains(&"schedules.drop"), "got {keys:?}");
         assert!(keys.contains(&"schedules.add"), "got {keys:?}");
+    }
+
+    #[test]
+    fn append_serializable_writes_one_json_line_per_call() {
+        #[derive(serde::Serialize)]
+        struct Tiny {
+            a: u32,
+            b: &'static str,
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory_audit.log");
+        let log = FileAuditLog::new(&path);
+        log.append_serializable(&Tiny { a: 1, b: "hi" })
+            .expect("first");
+        log.append_serializable(&Tiny { a: 2, b: "yo" })
+            .expect("second");
+        let body = std::fs::read_to_string(&path).expect("read");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let v: serde_json::Value = serde_json::from_str(lines[0]).expect("valid json");
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], "hi");
+        // Assert the second line too, so the test proves the writer *appends*
+        // (distinct values per call) rather than overwriting.
+        let v2: serde_json::Value = serde_json::from_str(lines[1]).expect("valid json");
+        assert_eq!(v2["a"], 2);
+        assert_eq!(v2["b"], "yo");
     }
 }

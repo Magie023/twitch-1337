@@ -20,6 +20,7 @@ use twitch_1337_core::aviation::TrackerCommand;
 use twitch_1337_core::commands::leaderboard::PersonalBest;
 use twitch_1337_core::config::AiBootstrap;
 use twitch_1337_core::ping::PingHandle;
+use twitch_1337_core::settings::FileAuditLog;
 
 use crate::auth::OAuthCtx;
 use crate::auth::session::SessionTable;
@@ -53,6 +54,10 @@ pub struct WebState {
     /// per-path mutex map coherent — two independent stores against the
     /// same on-disk tree would silently race past each other's locks.
     pub memory_store: MemoryStore,
+    /// Append-only audit log for dashboard memory mutations
+    /// (`$DATA_DIR/memory_audit.log`). Sibling of the settings audit log;
+    /// written best-effort by the `/memory/*` write/create/delete routes.
+    pub memory_audit: Arc<FileAuditLog>,
     /// HMAC key for signed cookies (sid + csrf). Derived from
     /// `[web].session_secret` in the bin so tampering with sid is detected
     /// on the next request rather than handled by HashMap miss alone.

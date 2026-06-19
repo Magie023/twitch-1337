@@ -101,6 +101,9 @@ async fn main() -> Result<()> {
 
     let helix: Arc<dyn HelixClient> = Arc::new(StubHelix);
 
+    let memory_audit = Arc::new(twitch_1337_core::settings::FileAuditLog::new(
+        data_dir.join("memory_audit.log"),
+    ));
     let state = WebState {
         sessions,
         helix,
@@ -113,6 +116,7 @@ async fn main() -> Result<()> {
         oauth,
         ping_actor,
         memory_store,
+        memory_audit,
         telemetry: twitch_1337_core::schedule::TelemetryStore::open(&data_dir),
         signed_key,
         leaderboard: Arc::new(RwLock::new(HashMap::new())),

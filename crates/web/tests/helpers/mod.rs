@@ -223,6 +223,9 @@ async fn build_state_inner_keep_settings(
     let memory_store = MemoryStore::open(memory_dir.path(), settings_handle.clone())
         .await
         .expect("open memory store");
+    let memory_audit = Arc::new(twitch_1337_core::settings::FileAuditLog::new(
+        memory_dir.path().join("memory_audit.log"),
+    ));
     // Reuse pings_dir for telemetry: TelemetryStore only writes on flush, and
     // pings_dir is returned to callers so it stays alive for the test lifetime.
     let telemetry = twitch_1337_core::schedule::TelemetryStore::open(pings_dir.path());
@@ -238,6 +241,7 @@ async fn build_state_inner_keep_settings(
         oauth,
         ping_actor,
         memory_store,
+        memory_audit,
         signed_key,
         leaderboard: Arc::new(RwLock::new(HashMap::new())),
         tracker_tx: None,

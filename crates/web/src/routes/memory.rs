@@ -18,10 +18,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tower_cookies::Cookies;
-use twitch_1337_core::ai::memory::store::{FrontmatterOverride, WriteOutcome, validate_state_slug};
+use twitch_1337_core::ai::memory::store::{
+    FrontmatterOverride, Mtime, WriteOutcome, validate_state_slug,
+};
 use twitch_1337_core::ai::memory::types::{FileKind, MemoryFile};
+use twitch_1337_core::settings::audit::berlin_now;
 
 use crate::auth::csrf;
 use crate::auth::session::Session;
@@ -656,6 +659,76 @@ struct CsrfOnly {
     csrf: String,
 }
 
+/// One JSONL line per dashboard memory mutation, appended to
+/// `$DATA_DIR/memory_audit.log`. Cheap fields only — see
+/// docs/superpowers/specs/2026-06-19-memory-edit-audit-log-design.md.
+#[derive(Serialize)]
+struct MemoryAuditEntry {
+    ts: chrono::DateTime<chrono_tz::Tz>,
+    actor_id: String,
+    actor_login: String,
+    op: &'static str,   // "write" | "create" | "delete"
+    kind: &'static str, // "soul" | "lore" | "user" | "state"
+    id: String,         // slug or user_id; empty for soul/lore
+    result: String,     // "ok" | "conflict" | "error:<variant>"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mtime_before: Option<Mtime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mtime_after: Option<Mtime>,
+    /// Byte length of the submitted body, NOT the on-disk file size — the
+    /// file also carries frontmatter. Recording the body length is the
+    /// "cheap field, no extra disk read" choice from the spec.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_bytes: Option<usize>,
+}
+
+fn kind_tag(kind: &FileKind) -> &'static str {
+    match kind {
+        FileKind::Soul => "soul",
+        FileKind::Lore => "lore",
+        FileKind::User { .. } => "user",
+        FileKind::State { .. } => "state",
+    }
+}
+
+/// Best-effort append of one memory-audit line. A write failure is logged and
+/// swallowed — the dashboard save already succeeded and must not be undone by
+/// an audit hiccup (mirrors `SettingsStore::commit`).
+#[allow(clippy::too_many_arguments)]
+// 9 args is past clippy's 7; this is a single flat record builder, threading a
+// struct here would just move the field list one call deeper.
+fn audit_memory(
+    state: &WebState,
+    session: &Session,
+    op: &'static str,
+    kind: &'static str,
+    id: &str,
+    result: String,
+    mtime_before: Option<Mtime>,
+    mtime_after: Option<Mtime>,
+    body_bytes: Option<usize>,
+) {
+    let entry = MemoryAuditEntry {
+        ts: berlin_now(state.clock.now()),
+        actor_id: session.user_id.clone(),
+        actor_login: session.user_login.clone(),
+        op,
+        kind,
+        id: id.to_owned(),
+        result,
+        mtime_before,
+        mtime_after,
+        body_bytes,
+    };
+    if let Err(error) = state.memory_audit.append_serializable(&entry) {
+        tracing::error!(
+            target: "twitch_1337_web",
+            ?error,
+            "memory audit append failed"
+        );
+    }
+}
+
 /// Validates csrf, dispatches to `write_with_guard`, and on
 /// `WriteError::{Full,StateFull,InvalidSlug}` re-renders the originating
 /// editor with the user's draft + an inline error so the work isn't lost.
@@ -688,7 +761,7 @@ async fn save_kind(
         .await;
     let csrf_hex = csrf::encode(&session.csrf_value);
     match outcome {
-        Ok(WriteOutcome::Written { .. }) => {
+        Ok(WriteOutcome::Written { new_mtime }) => {
             tracing::info!(
                 target: "twitch_1337_web",
                 user_id = %session.user_id,
@@ -696,6 +769,17 @@ async fn save_kind(
                 target_label = %label,
                 target_id = %id,
                 result = "ok",
+            );
+            audit_memory(
+                state,
+                session,
+                "write",
+                kind_tag(&kind),
+                &id,
+                "ok".to_owned(),
+                Some(form.mtime),
+                Some(new_mtime),
+                Some(form.body.len()),
             );
             flash::set(cookies, &format!("{label} saved"));
             Ok(Redirect::to(&redirect_to).into_response())
@@ -711,6 +795,17 @@ async fn save_kind(
                 target_label = %label,
                 target_id = %id,
                 result = "conflict",
+            );
+            audit_memory(
+                state,
+                session,
+                "write",
+                kind_tag(&kind),
+                &id,
+                "conflict".to_owned(),
+                Some(form.mtime),
+                Some(current_mtime),
+                None,
             );
             Err(WebError::Conflict(Box::new(ConflictPayload {
                 kind: label,
@@ -738,6 +833,17 @@ async fn save_kind(
                 target_id = %id,
                 result = "error",
                 error = ?err,
+            );
+            audit_memory(
+                state,
+                session,
+                "write",
+                kind_tag(&kind),
+                &id,
+                format!("error:{err}"),
+                Some(form.mtime),
+                None,
+                None,
             );
             // Render the editor with the user's draft preserved. `Io` is the
             // only variant that lacks a meaningful form context — bubble it.
@@ -922,6 +1028,17 @@ async fn create_state(
                 target_id = %slug,
                 result = "ok",
             );
+            audit_memory(
+                &state,
+                &session,
+                "create",
+                "state",
+                &slug,
+                "ok".to_owned(),
+                None,
+                None,
+                Some(form.body.len()),
+            );
             flash::set(&cookies, &format!("state `{slug}` created"));
             Ok(Redirect::to(&format!("/memory/state/{slug}")).into_response())
         }
@@ -934,6 +1051,17 @@ async fn create_state(
                 target_id = %slug,
                 result = "error",
                 error = ?err,
+            );
+            audit_memory(
+                &state,
+                &session,
+                "create",
+                "state",
+                &slug,
+                format!("error:{err}"),
+                None,
+                None,
+                None,
             );
             let msg = write_error_for_form(err)?;
             render_state_create(
@@ -1021,6 +1149,17 @@ async fn delete_state(
         target_label = "state",
         target_id = %slug,
         result = "ok",
+    );
+    audit_memory(
+        &state,
+        &session,
+        "delete",
+        "state",
+        &slug,
+        "ok".to_owned(),
+        None,
+        None,
+        None,
     );
     flash::set(&cookies, &format!("state `{slug}` deleted"));
     Ok(Redirect::to("/memory/state").into_response())
