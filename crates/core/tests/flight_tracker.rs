@@ -1962,3 +1962,30 @@ async fn track_iata_query_5xx_still_tries_icao_fallback() {
 
     bot.shutdown().await;
 }
+
+#[tokio::test]
+async fn track_callsign_adsb_5xx_returns_error_without_persisting() {
+    let bot = TestBotBuilder::new().spawn().await;
+
+    Mock::given(method("GET"))
+        .and(path("/callsign/DLH500"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&bot.adsb_mock)
+        .await;
+
+    let mut bot = bot;
+    bot.send("alice", "!track DLH500").await;
+    let reply = bot.expect_say(Duration::from_secs(5)).await;
+    assert!(
+        reply.contains("ADS-B Anfrage fehlgeschlagen"),
+        "expected ADS-B 5xx error, got: {reply}"
+    );
+
+    let state_path = bot.data_dir.path().join("flights.ron");
+    assert!(
+        tokio::fs::read_to_string(state_path).await.is_err(),
+        "failed initial ADS-B lookup must not create tracker state"
+    );
+
+    bot.shutdown().await;
+}
