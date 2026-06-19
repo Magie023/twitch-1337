@@ -153,3 +153,48 @@ async fn flights_unauthenticated_redirects() {
         res.status()
     );
 }
+
+#[tokio::test]
+async fn flights_delete_posts_tracker_command_and_redirects_with_flash() {
+    install_crypto();
+    let (mut state, _td_pings, _td_mem) = build_state_with_dirs(mod_helix()).await;
+    let (tx, mut rx) = mpsc::channel::<TrackerCommand>(8);
+    state.tracker_tx = Some(Arc::new(tx));
+
+    tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            if let TrackerCommand::DeleteFromWeb { identifier, reply } = cmd {
+                assert_eq!(identifier, "DLH123");
+                let _ = reply.send(Some("DLH123".to_owned()));
+                break;
+            }
+        }
+    });
+
+    let (sid, csrf, bare_csrf) = insert_session(&state, "42", "admin");
+    let body = format!(
+        "_csrf={csrf}&identifier=DLH123",
+        csrf = urlencoding::encode(&bare_csrf)
+    );
+    let req = Request::builder()
+        .uri("/flights/delete")
+        .method(Method::POST)
+        .header(header::COOKIE, cookie_header(&sid, &csrf))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let res = app(state).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res.headers().get(header::LOCATION).unwrap(), "/flights");
+    let set_cookie = res
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        set_cookie.contains("tw1337_flash"),
+        "delete should set a flash cookie; got {set_cookie}"
+    );
+}
