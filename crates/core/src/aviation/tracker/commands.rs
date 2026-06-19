@@ -16,10 +16,10 @@ use super::{
     debug_journal::{DebugHttpOutcome, FlightTrackerDebugEvent, append_debug_event},
     format::{msg_aviationstack_info, msg_flight_status, msg_flights_list, msg_track_started},
     metadata::{
-        add_alias_callsign, aircraft_callsign, apply_aviationstack_metadata, metadata_callsign,
-        normalize_flight_code, seed_flight_aliases, set_hex_if_consistent, set_route_from_iata,
+        aircraft_callsign, apply_aviationstack_metadata, metadata_callsign, normalize_flight_code,
+        seed_flight_aliases, set_route_from_iata,
     },
-    phase::{altitude_ft, detect_phase, vertical_rate},
+    phase::detect_phase,
     schedule::{PollReadiness, poll_readiness},
     state::save_tracker_state,
 };
@@ -27,9 +27,9 @@ use super::{
 use super::{MAX_FLIGHTS_PER_USER, MAX_TRACKED_FLIGHTS, POLL_TIMEOUT, ROUTE_FETCH_TIMEOUT};
 
 use super::advance::{
-    Emit, Followup, Observation, PollOutcome, RemovalReason, advance_flight, apply_route,
-    candidate_callsign_matches_flight, format_emit, identifier_callsign, last_seen_age_secs,
-    target_confirmation_for_aircraft,
+    Emit, Followup, Observation, PollOutcome, RemovalReason, advance_flight,
+    apply_observed_aircraft, apply_route, candidate_callsign_matches_flight, format_emit,
+    identifier_callsign, last_seen_age_secs, target_confirmation_for_aircraft,
 };
 
 fn find_index_by_identifier(
@@ -792,29 +792,12 @@ async fn handle_track<T, L>(
                     };
 
                     let target_confirmed = confirmation.is_target_confirmed();
-                    flight.target_confirmation = confirmation;
-                    flight.observed_callsign =
-                        aircraft_callsign(&ac).map(std::string::ToString::to_string);
-                    if (confirmation == TargetConfirmation::ConfirmedByCallsign
-                        || matches!(&flight.identifier, FlightIdentifier::Hex(_)))
-                        && flight.callsign.is_none()
-                        && flight.observed_callsign.is_some()
-                    {
-                        flight.callsign.clone_from(&flight.observed_callsign);
-                        if let Some(callsign) = flight.callsign.clone() {
-                            add_alias_callsign(&mut flight, &callsign);
-                        }
-                    }
-                    if let Some(hex) = ac.hex.as_deref() {
-                        set_hex_if_consistent(&mut flight, hex, HexSource::Adsb, target_confirmed);
-                    }
-                    flight.aircraft_type = ac.t.clone();
-                    flight.altitude_ft = altitude_ft(&ac);
-                    flight.vertical_rate_fpm = vertical_rate(&ac);
-                    flight.ground_speed_kts = ac.gs;
-                    flight.lat = ac.lat;
-                    flight.lon = ac.lon;
-                    flight.squawk = ac.squawk.clone();
+                    // Seed identity + telemetry through the shared core, the one
+                    // owner of this mutation (also driven per-cycle by
+                    // `advance_flight`). The initial-track ack does not announce,
+                    // so the newly-resolved callsign it returns is unused here.
+                    let _ =
+                        apply_observed_aircraft(&mut flight, &ac, confirmation, target_confirmed);
                     if target_confirmed {
                         flight.last_seen = Some(now);
                         flight.last_visible_at = Some(now);

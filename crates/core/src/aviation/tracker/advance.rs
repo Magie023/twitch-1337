@@ -187,6 +187,59 @@ pub(crate) fn target_confirmation_for_aircraft(
     }
 }
 
+/// Seed a flight's identity and telemetry from a confirming observation's
+/// aircraft. Shared by [`advance_flight`] (the per-cycle transition) and the
+/// `!track` command's initial poll, which previously duplicated this mutation.
+///
+/// Assigns the confirmation, observed callsign, resolved callsign/hex, aircraft
+/// type, and position/velocity telemetry, and returns the callsign newly
+/// resolved by this observation (if any) so the caller can decide whether to
+/// look up its route. It deliberately does not touch `last_seen`,
+/// `last_visible_at`, or `phase`, nor emit anything — those are the caller's
+/// transition and announcement concerns.
+pub(super) fn apply_observed_aircraft(
+    flight: &mut TrackedFlight,
+    ac: &NearbyAircraft,
+    confirmation: TargetConfirmation,
+    direct_target_confirmed: bool,
+) -> Option<String> {
+    flight.target_confirmation = confirmation;
+    flight.observed_callsign = aircraft_callsign(ac).map(std::string::ToString::to_string);
+
+    let newly_resolved = if (confirmation == TargetConfirmation::ConfirmedByCallsign
+        || matches!(&flight.identifier, FlightIdentifier::Hex(_)))
+        && flight.callsign.is_none()
+        && let Some(cs) = flight.observed_callsign.clone()
+    {
+        debug!(identifier = %flight.identifier, callsign = %cs, "Resolved callsign");
+        flight.callsign = Some(cs.clone());
+        add_alias_callsign(flight, &cs);
+        Some(cs)
+    } else {
+        None
+    };
+
+    if let Some(hex) = ac.hex.as_deref()
+        && set_hex_if_consistent(flight, hex, HexSource::Adsb, direct_target_confirmed)
+    {
+        debug!(identifier = %flight.identifier, hex = %hex, "Resolved hex");
+    }
+    if flight.aircraft_type.is_none()
+        && let Some(t) = &ac.t
+    {
+        flight.aircraft_type = Some(t.clone());
+    }
+
+    flight.altitude_ft = altitude_ft(ac);
+    flight.vertical_rate_fpm = vertical_rate(ac);
+    flight.ground_speed_kts = ac.gs;
+    flight.lat = ac.lat;
+    flight.lon = ac.lon;
+    flight.squawk = ac.squawk.clone();
+
+    newly_resolved
+}
+
 /// The pure per-`Observation` transition. Mutates `flight` in place and
 /// returns the side effects (chat emits, debug-journal events, route
 /// followups, removal) for the poll loop to perform. No I/O.
@@ -325,37 +378,21 @@ pub(crate) fn advance_flight(
     if direct_target_confirmed {
         flight.last_seen = Some(now);
     }
-    flight.target_confirmation = confirmation;
-    flight.observed_callsign = aircraft_callsign(ac).map(std::string::ToString::to_string);
 
-    if (confirmation == TargetConfirmation::ConfirmedByCallsign
-        || matches!(&flight.identifier, FlightIdentifier::Hex(_)))
-        && flight.callsign.is_none()
-        && let Some(cs) = flight.observed_callsign.clone()
-    {
-        debug!(identifier = %flight.identifier, callsign = %cs, "Resolved callsign");
-        flight.callsign = Some(cs.clone());
-        add_alias_callsign(flight, &cs);
+    // Capture pre-observation telemetry the emit/divert decisions below compare
+    // against, before `apply_observed_aircraft` overwrites these fields.
+    let prev_lat = flight.lat;
+    let prev_lon = flight.lon;
+    let prev_squawk = flight.squawk.clone();
 
-        if flight.route.is_none() {
-            update.followups.push(Followup::FetchRoute {
-                callsign: cs.clone(),
-            });
-        }
-    }
-    if let Some(hex) = ac.hex.as_deref()
-        && set_hex_if_consistent(flight, hex, HexSource::Adsb, direct_target_confirmed)
+    if let Some(cs) = apply_observed_aircraft(flight, ac, confirmation, direct_target_confirmed)
+        && flight.route.is_none()
     {
-        debug!(identifier = %flight.identifier, hex = %hex, "Resolved hex");
-    }
-    if flight.aircraft_type.is_none()
-        && let Some(t) = &ac.t
-    {
-        flight.aircraft_type = Some(t.clone());
+        update.followups.push(Followup::FetchRoute { callsign: cs });
     }
 
     if let Some(new_squawk) = &ac.squawk {
-        let squawk_changed = flight.squawk.as_ref() != Some(new_squawk);
+        let squawk_changed = prev_squawk.as_ref() != Some(new_squawk);
         if phase_sample_confirmed
             && squawk_changed
             && let Some(meaning) = emergency_squawk_meaning(new_squawk)
@@ -366,16 +403,6 @@ pub(crate) fn advance_flight(
             });
         }
     }
-
-    let prev_lat = flight.lat;
-    let prev_lon = flight.lon;
-
-    flight.altitude_ft = altitude_ft(ac);
-    flight.vertical_rate_fpm = vertical_rate(ac);
-    flight.ground_speed_kts = ac.gs;
-    flight.lat = ac.lat;
-    flight.lon = ac.lon;
-    flight.squawk = ac.squawk.clone();
 
     if became_target_confirmed {
         update.emits.push(Emit::AdsbVisible);
@@ -588,6 +615,57 @@ mod tests {
             used_hex,
             outcome: PollOutcome::Miss,
         }
+    }
+
+    #[test]
+    fn apply_observed_aircraft_seeds_identity_and_telemetry() {
+        let mut f = tracked_flight(); // Pending, callsign DLH1234, hex/type/telemetry empty
+        let mut ac = aircraft_on_ground(); // callsign DLH1234, hex 3C6589, gs 15, squawk 1000
+        ac.t = Some("A320".to_string());
+
+        let newly =
+            apply_observed_aircraft(&mut f, &ac, TargetConfirmation::ConfirmedByCallsign, true);
+
+        assert_eq!(
+            f.target_confirmation,
+            TargetConfirmation::ConfirmedByCallsign
+        );
+        assert_eq!(f.observed_callsign.as_deref(), Some("DLH1234"));
+        assert_eq!(f.hex.as_deref(), Some("3C6589"));
+        assert_eq!(f.hex_source, Some(HexSource::Adsb));
+        assert_eq!(f.aircraft_type.as_deref(), Some("A320"));
+        assert_eq!(f.ground_speed_kts, Some(15.0));
+        assert_eq!(f.lat, Some(50.0));
+        assert_eq!(f.lon, Some(8.5));
+        assert_eq!(f.squawk.as_deref(), Some("1000"));
+        // Callsign was already known, so nothing was newly resolved.
+        assert_eq!(newly, None);
+        // The core seeds identity only; the caller owns these transition fields.
+        assert_eq!(f.last_seen, None);
+        assert_eq!(f.last_visible_at, None);
+        assert_eq!(f.phase, FlightPhase::Unknown);
+    }
+
+    #[test]
+    fn apply_observed_aircraft_resolves_callsign_for_hex_tracked_flight() {
+        let mut f = tracked_flight();
+        f.identifier = FlightIdentifier::Hex("3C6497".to_string());
+        f.callsign = None;
+        f.alias_callsigns = Vec::new();
+
+        let ac = aircraft(); // callsign DLH1929, hex 3C6497
+
+        let newly = apply_observed_aircraft(
+            &mut f,
+            &ac,
+            TargetConfirmation::InferredByAssignedHex,
+            false,
+        );
+
+        assert_eq!(newly.as_deref(), Some("DLH1929"));
+        assert_eq!(f.callsign.as_deref(), Some("DLH1929"));
+        assert!(f.alias_callsigns.iter().any(|a| a == "DLH1929"));
+        assert_eq!(f.observed_callsign.as_deref(), Some("DLH1929"));
     }
 
     #[test]
