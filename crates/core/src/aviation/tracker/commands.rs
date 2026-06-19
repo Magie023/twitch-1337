@@ -32,6 +32,13 @@ use super::advance::{
     identifier_callsign, last_seen_age_secs, target_confirmation_for_aircraft,
 };
 
+fn flight_state_changed(before: &TrackedFlight, after: &TrackedFlight) -> bool {
+    match (serde_json::to_value(before), serde_json::to_value(after)) {
+        (Ok(before), Ok(after)) => before != after,
+        _ => true,
+    }
+}
+
 fn find_index_by_identifier(
     flights: &[TrackedFlight],
     identifier: &FlightIdentifier,
@@ -1164,7 +1171,6 @@ where
     L: LoginCredentials,
 {
     let now = clock.now_utc();
-    let mut changed = false;
     let mut removals: Vec<FlightIdentifier> = Vec::new();
     let mut messages: Vec<String> = Vec::new();
     let mut deferred_commands = Vec::new();
@@ -1176,7 +1182,22 @@ where
     let mut join_set = tokio::task::JoinSet::new();
     let mut fetch_results: Vec<PollAttempt> = Vec::new();
 
-    for flight in state.flights.iter() {
+    let flight_poll_inputs: Vec<TrackedFlight> = state.flights.clone();
+    for flight in flight_poll_inputs.iter() {
+        drain_latency_sensitive_commands(
+            &mut cmd_rx,
+            state,
+            data_dir,
+            clock,
+            &mut deferred_commands,
+        )
+        .await;
+
+        let Some(current_idx) = find_index_by_identifier(&state.flights, &flight.identifier) else {
+            continue;
+        };
+        let flight = &state.flights[current_idx];
+
         match poll_readiness(flight, now) {
             PollReadiness::Due => {}
             PollReadiness::NotDue(_) => continue,
@@ -1193,7 +1214,6 @@ where
                 .await;
                 messages.push(format_emit(flight, &Emit::PendingExpired, now));
                 removals.push(flight.identifier.clone());
-                changed = true;
                 continue;
             }
         }
@@ -1222,6 +1242,15 @@ where
             };
             result
         });
+
+        drain_latency_sensitive_commands(
+            &mut cmd_rx,
+            state,
+            data_dir,
+            clock,
+            &mut deferred_commands,
+        )
+        .await;
     }
 
     if let Some(cmd_rx) = cmd_rx.as_mut() {
@@ -1229,8 +1258,14 @@ where
         while !join_set.is_empty() {
             tokio::select! {
                 res = join_set.join_next() => {
-                    if let Some(Ok((identifier, used_hex, poll_result))) = res {
-                        fetch_results.push((identifier, used_hex, poll_result));
+                    match res {
+                        Some(Ok((identifier, used_hex, poll_result))) => {
+                            fetch_results.push((identifier, used_hex, poll_result));
+                        }
+                        Some(Err(e)) => {
+                            warn!(error = ?e, "ADS-B poll task failed");
+                        }
+                        None => {}
                     }
                 }
                 cmd = cmd_rx.recv(), if command_channel_open => {
@@ -1256,8 +1291,13 @@ where
         }
     } else {
         while let Some(res) = join_set.join_next().await {
-            if let Ok((identifier, used_hex, poll_result)) = res {
-                fetch_results.push((identifier, used_hex, poll_result));
+            match res {
+                Ok((identifier, used_hex, poll_result)) => {
+                    fetch_results.push((identifier, used_hex, poll_result));
+                }
+                Err(e) => {
+                    warn!(error = ?e, "ADS-B poll task failed");
+                }
             }
         }
     }
@@ -1290,11 +1330,14 @@ where
         };
         let obs = Observation { used_hex, outcome };
 
+        let before = state.flights[idx].clone();
         let update = {
             let flight = &mut state.flights[idx];
             advance_flight(flight, &obs, now)
         };
-        changed = true;
+        if flight_state_changed(&before, &state.flights[idx]) {
+            save_tracker_state(data_dir, state).await;
+        }
 
         for event in update.debug {
             append_debug_event(data_dir, now, event).await;
@@ -1311,8 +1354,12 @@ where
                 Ok(Ok(Some(route))) => {
                     let origin = route.origin.iata_code.clone();
                     let dest = route.destination.iata_code.clone();
+                    let route_before = state.flights[idx].clone();
                     let flight = &mut state.flights[idx];
                     apply_route(flight, &origin, &dest);
+                    if flight_state_changed(&route_before, &state.flights[idx]) {
+                        save_tracker_state(data_dir, state).await;
+                    }
                     append_debug_event(
                         data_dir,
                         now,
@@ -1394,7 +1441,7 @@ where
     for identifier in removals {
         if let Some(idx) = find_index_by_identifier(&state.flights, &identifier) {
             state.flights.remove(idx);
-            changed = true;
+            save_tracker_state(data_dir, state).await;
         }
     }
 
@@ -1405,9 +1452,8 @@ where
         sender.say(channel.to_string(), msg).await;
     }
 
-    if changed {
-        save_tracker_state(data_dir, state).await;
-    }
+    // State changes are persisted immediately when they happen so dashboard
+    // commands and shutdowns during long poll cycles do not lose progress.
 
     deferred_commands
 }
