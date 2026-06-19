@@ -218,7 +218,7 @@ impl SevenTvEmoteProvider {
         let caps = self.live_caps();
         match self.prompt_emotes(twitch_channel_id, &caps).await {
             Some(emotes) => build_search_block(&emotes, query, SEARCH_EMOTES_LIMIT),
-            None => "Emote catalog is unavailable right now; use only the emote codes already listed in the system prompt.".to_string(),
+            None => "Emote catalog is unavailable right now; use only the emote codes already provided in this turn's context.".to_string(),
         }
     }
 
@@ -559,7 +559,7 @@ fn build_search_block(emotes: &[PromptEmote], query: &str, limit: usize) -> Stri
     let matches = select_search_emotes(emotes, query, limit);
     if matches.is_empty() {
         return format!(
-            "No emotes matched {query:?}. Use only the emote codes already listed in the system prompt; do not invent codes."
+            "No emotes matched {query:?}. Use only the emote codes already provided in this turn's context; do not invent codes."
         );
     }
     let lines = matches

@@ -57,6 +57,61 @@ async fn ai_command_returns_fake_response() {
 }
 
 #[tokio::test]
+async fn ai_system_message_is_byte_stable_across_turns() {
+    // The production cache claim: consecutive !ai turns must send a
+    // byte-identical system message so Gemini's implicit prefix cache hits.
+    // Same bot => same per-process nonce; the fake model writes no memory, so
+    // durable memory is unchanged between turns. Two different speakers also
+    // proves the speaker no longer leaks into the cached system prefix (the
+    // {speaker_role} removal) and sidesteps the per-user cooldown.
+    let mut bot = TestBotBuilder::new().with_ai().spawn().await;
+
+    bot.llm.push_tool_message("erste antwort");
+    bot.send("alice", "!ai erste frage").await;
+    assert_eq!(
+        bot.expect_reply(Duration::from_secs(2)).await,
+        "erste antwort"
+    );
+
+    bot.llm.push_tool_message("zweite antwort");
+    bot.send("bob", "!ai voellig andere frage").await;
+    assert_eq!(
+        bot.expect_reply(Duration::from_secs(2)).await,
+        "zweite antwort"
+    );
+
+    let calls = bot.llm.tool_calls();
+    assert_eq!(calls.len(), 2, "expected one LLM call per turn");
+
+    let content = |i: usize, role: Role| {
+        calls[i]
+            .messages
+            .iter()
+            .find(|m| m.role == role)
+            .unwrap_or_else(|| panic!("turn {i} request missing a {role:?} message"))
+            .content
+            .clone()
+    };
+
+    assert!(
+        !content(0, Role::System).is_empty(),
+        "system message should not be empty"
+    );
+    assert_eq!(
+        content(0, Role::System),
+        content(1, Role::System),
+        "system message must be byte-identical across turns (the cache prefix)"
+    );
+    assert_ne!(
+        content(0, Role::User),
+        content(1, Role::User),
+        "user messages should differ (different speaker + instruction), proving the system equality is real and not two identical turns"
+    );
+
+    bot.shutdown().await;
+}
+
+#[tokio::test]
 async fn ai_command_empty_shows_usage() {
     let mut bot = TestBotBuilder::new().with_ai().spawn().await;
 
@@ -145,22 +200,24 @@ meaning = "steht nicht im aktuellen 7TV-Katalog"
 
     let calls = bot.llm.tool_calls();
     assert_eq!(calls.len(), 1, "expected exactly one LLM call");
-    let system_msg = calls[0]
+    // Emote block is volatile (varies per turn), so it lives in the user
+    // message — keeping the system message as a stable cache prefix.
+    let user_msg = calls[0]
         .messages
         .iter()
-        .find(|m| m.role == Role::System)
-        .expect("request has a system message");
-    assert!(system_msg.content.contains("7TV emotes available"));
-    assert!(system_msg.content.contains("KEKW"));
-    assert!(system_msg.content.contains("meaning=lachen"));
-    assert!(system_msg.content.contains("LocalEmote"));
-    assert!(!system_msg.content.contains("MissingEmote"));
-    let local_pos = system_msg.content.find("- LocalEmote:").unwrap();
-    let kekw_pos = system_msg.content.find("- KEKW:").unwrap();
+        .find(|m| m.role == Role::User)
+        .expect("request has a user message");
+    assert!(user_msg.content.contains("7TV emotes available"));
+    assert!(user_msg.content.contains("KEKW"));
+    assert!(user_msg.content.contains("meaning=lachen"));
+    assert!(user_msg.content.contains("LocalEmote"));
+    assert!(!user_msg.content.contains("MissingEmote"));
+    let local_pos = user_msg.content.find("- LocalEmote:").unwrap();
+    let kekw_pos = user_msg.content.find("- KEKW:").unwrap();
     assert!(
         local_pos < kekw_pos,
         "recent chat emote should rank before generic context match:\n{}",
-        system_msg.content
+        user_msg.content
     );
 
     bot.shutdown().await;

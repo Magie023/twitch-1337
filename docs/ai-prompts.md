@@ -7,10 +7,10 @@ The bot's prompts live as Markdown files in the repo at `crates/core/data/prompt
 | File | Used by | Role |
 |---|---|---|
 | `system.md` | `!ai` chat-turn loop | System prompt for the per-turn LLM session. |
-| `ai_instructions.md` | `!ai` chat-turn loop | Preamble prepended to the user message before chat history + the new message. |
+| `ai_instructions.md` | `!ai` chat-turn loop | Preamble prepended to the user message before the relevant-emotes block, volatile state, recent chat, and the new message. |
 | `dreamer.md` | nightly ritual | System prompt for the dreamer LLM. |
 
-The chat turn injects `system.md` as the system prompt, then `ai_instructions.md` + speaker metadata + chat history + the new message as the user message. The ritual injects `dreamer.md` as the system prompt, then memory + transcript as the user message.
+The chat turn injects `system.md` as the system prompt, then `ai_instructions.md` + speaker metadata + relevant-emotes block + volatile state + recent chat + the new message as the user message. The ritual injects `dreamer.md` as the system prompt, then memory + transcript as the user message.
 
 ## Substitution tokens
 
@@ -21,13 +21,15 @@ The loader runs a simple `str::replace` pass before sending. Available tokens:
 | `{speaker_username}` | Twitch login (lowercase) of the speaker | `system.md`, `ai_instructions.md` |
 | `{speaker_display}` | Display name (falls back to login) | `system.md`, `ai_instructions.md` |
 | `{speaker_user_id}` | Twitch numeric user id of the speaker | `system.md`, `ai_instructions.md` |
-| `{speaker_role}` | `regular`, `moderator`, `broadcaster` | `system.md`, `ai_instructions.md` |
+| `{speaker_role}` | `regular`, `moderator`, `broadcaster` | `ai_instructions.md` |
 | `{channel}` | Channel name (without `#`) | all |
 | `{date}` | Today's Berlin-local date, `YYYY-MM-DD` | all |
 | `{model}` | Display name. OpenRouter: from provider catalog (normalized). Otherwise: same as `{model_id}`. | `system.md` |
 | `{model_id}` | Raw model id sent to the API (`ai.connection.model`). | `system.md` |
 
 Unknown tokens (e.g. typos like `{user_name}`) are left as literal text — no error, no warning. Check spelling.
+
+**Cache prefix constraint.** `{speaker_*}` tokens must not appear in `system.md`: interpolating them would split the stable cache prefix once per speaker role. They belong in `ai_instructions.md` (the user message). `{model}` and `{model_id}` in `system.md` are intentional; model identity changes rarely and is not per-user.
 
 ## Authoring guidelines
 
@@ -40,6 +42,8 @@ Unknown tokens (e.g. typos like `{user_name}`) are left as literal text — no e
 **Replies**. The model's final assistant text (returned when it makes no more tool calls) is sent to chat verbatim. Newlines collapse into a single chat line. There is no `say` tool — encourage the model to do memory updates first, then end the turn with the reply text.
 
 **Length nudge**. The final reply is truncated app-side at `MAX_RESPONSE_LENGTH` chars. Asking for "≤3 sentences" in the prompt keeps lines tidy.
+
+**Prefix stability (caching).** The chat-turn system message is built to be a byte-stable cache prefix so Gemini's implicit prompt cache hits (cached tokens bill at 0.25x). `build_chat_turn_messages` in `inject.rs` enforces the split: stable content (substituted `system.md`, the tool appendices, and durable SOUL/LORE/user memory) goes in the system message; everything per-turn (the relevant-emotes block, volatile state, recent chat, the instruction) goes in the user message. Two rules keep the prefix stable: do not interpolate per-speaker tokens into `system.md`, and do not append per-turn content to the system message. Both reintroduce a cache miss every turn.
 
 **Refusal**. The bot refuses by returning empty final text — nothing is sent to chat. Encourage the model to stay silent on harassment, off-topic, or low-signal prompts rather than producing a defensive reply.
 

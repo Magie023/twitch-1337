@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use chrono_tz::Europe::Berlin;
 use eyre::Result;
+use llm::Message;
 use rand::Rng as _;
 use tokio::sync::Mutex;
 
@@ -379,6 +380,74 @@ fn format_entry_line(entry: &ChatHistoryEntry, bot_login: &str, persona_name: &s
     format!("[{ts}] {name}: {}", entry.text)
 }
 
+/// Stable parts of the chat-turn system message. For a given config + memory
+/// snapshot these are byte-identical across turns, which is what lets Gemini's
+/// implicit prompt cache hit. Volatile per-turn content is forbidden here by
+/// type — it can only reach [`UserParts`].
+pub struct SystemParts {
+    /// Substituted `system.md`. After the `{speaker_role}` drop it interpolates
+    /// only `{channel}`, so it is identical for every speaker.
+    pub head: String,
+    /// Stable per-mode appendices, appended to `head` in order. Each carries
+    /// its own leading separator (the consts are `\n\n…`-prefixed): emote-tools,
+    /// then grok/web.
+    pub appendices: Vec<String>,
+    /// SOUL/LORE/user fences from [`build_chat_turn_context`]. Stable while the
+    /// memory content and the (per-process) nonce are unchanged.
+    pub durable_memory: String,
+}
+
+/// Per-turn (volatile) parts. Every field here may change turn to turn; all of
+/// it lands in the user message so it never disturbs the cached system prefix.
+pub struct UserParts {
+    /// Relevant-emotes block for this turn (`prompt_block_for_turn`). `None`
+    /// when the emote provider is inactive or produced nothing.
+    pub emote_block: Option<String>,
+    /// `state/<slug>` fences from [`build_chat_turn_context`].
+    pub volatile_state: String,
+    /// Rolling chat history for this turn.
+    pub recent_chat: String,
+    /// Substituted `ai_instructions.md` (carries speaker vars + date).
+    pub instructions: String,
+    /// The user's instruction, already augmented with any reply context.
+    pub instruction: String,
+}
+
+/// Assemble the `!ai` chat-turn messages from stable and volatile parts.
+///
+/// `system` = `head` + each appendix + `"\n\n"` + `durable_memory`.
+/// `user`   = `emote_block?` + `volatile_state?` + `recent_chat?` + `instructions` + `instruction`.
+///
+/// Keeping every volatile section in the user message is what makes the system
+/// message a stable cache prefix; see `docs/ai-prompts.md`.
+pub fn build_chat_turn_messages(sys: SystemParts, user: UserParts) -> (Message, Message) {
+    let mut system = sys.head;
+    for appendix in &sys.appendices {
+        system.push_str(appendix);
+    }
+    system.push_str("\n\n");
+    system.push_str(&sys.durable_memory);
+
+    let mut user_message = String::new();
+    if let Some(block) = user.emote_block.as_deref() {
+        user_message.push_str(block.trim_start());
+        user_message.push_str("\n\n");
+    }
+    if !user.volatile_state.is_empty() {
+        user_message.push_str(&user.volatile_state);
+        user_message.push_str("\n\n");
+    }
+    if !user.recent_chat.is_empty() {
+        user_message.push_str(&user.recent_chat);
+        user_message.push_str("\n\n");
+    }
+    user_message.push_str(&user.instructions);
+    user_message.push_str("\n\n");
+    user_message.push_str(&user.instruction);
+
+    (Message::system(system), Message::user(user_message))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -613,12 +682,18 @@ mod tests {
 
     #[test]
     fn bundled_system_substitutes_cleanly() {
-        // Mirror the ai_instructions check: the system prompt uses {channel} and
-        // {speaker_role}; both must render and no known token may leak.
+        // The system prompt uses {channel}; {speaker_role} must be absent
+        // (interpolating it would split the stable cache prefix three ways).
         let out = substitute(PROMPT_SYSTEM, sample_vars());
         assert!(
             out.contains("#euterheissgetraenk"),
             "channel did not substitute:\n{out}"
+        );
+        // {speaker_role} must not live in system.md — interpolating it splits
+        // the cache prefix three ways (regular/moderator/broadcaster).
+        assert!(
+            !PROMPT_SYSTEM.contains("{speaker_role}"),
+            "system.md must not interpolate {{speaker_role}}"
         );
         for tok in KNOWN_TOKENS {
             assert!(
@@ -1035,6 +1110,133 @@ mod tests {
             carol_idx < alice_idx && carol_idx < bob_idx,
             "speaker must come first:\n{}",
             ctx.durable_memory
+        );
+    }
+
+    #[test]
+    fn build_chat_turn_messages_assembles_in_order() {
+        let (system, user) = build_chat_turn_messages(
+            SystemParts {
+                head: "HEAD".to_string(),
+                appendices: vec!["\n\nAPP".to_string()],
+                durable_memory: "DURABLE".to_string(),
+            },
+            UserParts {
+                emote_block: None,
+                volatile_state: String::new(),
+                recent_chat: String::new(),
+                instructions: "INSTR".to_string(),
+                instruction: "INSTRUCTION".to_string(),
+            },
+        );
+        assert_eq!(system.role, llm::Role::System);
+        assert_eq!(user.role, llm::Role::User);
+        assert_eq!(system.content, "HEAD\n\nAPP\n\nDURABLE");
+        assert_eq!(user.content, "INSTR\n\nINSTRUCTION");
+    }
+
+    #[test]
+    fn build_chat_turn_messages_system_is_stable_across_volatile_changes() {
+        let sys = || SystemParts {
+            head: "SYS HEAD".to_string(),
+            appendices: vec!["\n\nAPP1".to_string(), "\n\nAPP2".to_string()],
+            durable_memory: "<<<FILE kind=soul nonce=abc>>>\nsoul\n<<<ENDFILE nonce=abc>>>"
+                .to_string(),
+        };
+        let (sys_a, user_a) = build_chat_turn_messages(
+            sys(),
+            UserParts {
+                emote_block: Some("\n\n7TV emotes available: EMOTES_A".to_string()),
+                volatile_state: "STATE A".to_string(),
+                recent_chat: "CHAT A".to_string(),
+                instructions: "INSTR".to_string(),
+                instruction: "do A".to_string(),
+            },
+        );
+        let (sys_b, _user_b) = build_chat_turn_messages(
+            sys(),
+            UserParts {
+                emote_block: Some(
+                    "\n\n7TV emotes available: EMOTES_B totally different".to_string(),
+                ),
+                volatile_state: "STATE B different".to_string(),
+                recent_chat: "CHAT B different".to_string(),
+                instructions: "INSTR".to_string(),
+                instruction: "do B different".to_string(),
+            },
+        );
+        // The whole point: volatile turn data must not perturb the system prefix.
+        assert_eq!(
+            sys_a.content, sys_b.content,
+            "system message must be byte-identical across turns"
+        );
+        // Volatile data lands in the user message...
+        assert!(user_a.content.contains("EMOTES_A"));
+        assert!(user_a.content.contains("STATE A"));
+        assert!(user_a.content.contains("CHAT A"));
+        assert!(user_a.content.contains("do A"));
+        // ...and never leaks into the cached system prefix.
+        assert!(!sys_a.content.contains("EMOTES_A"));
+        assert!(!sys_a.content.contains("STATE A"));
+    }
+
+    #[tokio::test]
+    async fn build_chat_turn_context_same_nonce_yields_identical_durable_memory() {
+        // The per-process nonce makes durable memory a stable cache prefix:
+        // with the nonce fixed and the store unchanged, two builds must be
+        // byte-identical. Guards against future per-build variation
+        // (timestamps, reordering, fresh randomness) creeping into the block.
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(dir.path(), test_handle()).await.unwrap();
+        store
+            .write(
+                &FileKind::User {
+                    user_id: "42".into(),
+                },
+                "alice body",
+                Some("alice"),
+                Some("Alice"),
+            )
+            .await
+            .unwrap();
+        store
+            .write_state(
+                &FileKind::State {
+                    slug: "quiz".into(),
+                },
+                "score: 3",
+                Some("42"),
+            )
+            .await
+            .unwrap();
+
+        let opts = || BuildOpts {
+            inject_byte_budget: 24576,
+            nonce: "stablenonce000000".into(),
+            primary_history: None,
+            primary_login: "main".into(),
+            ai_channel_history: None,
+            ai_channel_login: None,
+            invocation_channel: InvocationChannel::Primary,
+            bot_login: "bot".into(),
+            persona_name: "Aurora".into(),
+            speaker_login: String::new(),
+        };
+
+        let first = build_chat_turn_context(&store, opts()).await.unwrap();
+        let second = build_chat_turn_context(&store, opts()).await.unwrap();
+
+        assert!(
+            first.durable_memory.contains("kind=soul"),
+            "sanity: durable memory should hold the fenced blocks"
+        );
+        assert_eq!(
+            first.durable_memory, second.durable_memory,
+            "same nonce + unchanged store must yield byte-identical durable memory"
+        );
+        assert_eq!(
+            first.volatile_state, second.volatile_state,
+            "same nonce + unchanged store must yield byte-identical volatile state"
         );
     }
 }
