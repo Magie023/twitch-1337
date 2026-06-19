@@ -1,62 +1,32 @@
-//! HTTP client for ADS-B aggregators (adsb.lol + fallbacks), adsbdb,
-//! Nominatim, and Aviationstack.
+//! adsb.lol position aggregation: the readsb-v2/adsb.fi aggregator set, the
+//! per-backend health/parking state machine, the merge of per-backend aircraft
+//! lists into a coverage superset, and the `get_aircraft_by_*` entry points.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eyre::{Result, WrapErr as _};
-use secrecy::{ExposeSecret as _, SecretString};
-use serde::Deserialize;
+use eyre::Result;
 use tracing::{debug, error, warn};
 
-use crate::util::APP_USER_AGENT;
+use crate::aviation::types::{AdsbAircraftResponse, NearbyAircraft};
 
-use super::location::{
-    ResolvedLocation, airline_table, is_iata_flight_number, is_icao_flight_number,
-};
-use super::tracker::FlightIdentifier;
-use super::types::{
-    AdsbAircraftResponse, AdsbDbAirlineResponse, AdsbDbResponse, AviationstackFlightMetadata,
-    AviationstackFlightsResponse, FlightRoute, NearbyAircraft,
-};
-
-/// Aviation-crate-internal runtime config for the Aviationstack HTTP enrichment
-/// endpoint. `api_key` comes from config.toml bootstrap; `base_url` and
-/// `timeout_secs` come from the dashboard settings store.
-#[derive(Clone)]
-pub(crate) struct AviationstackConfig {
-    pub(crate) api_key: SecretString,
-    pub(crate) base_url: String,
-    pub(crate) timeout_secs: u64,
-}
-
-const ADSBDB_BASE_URL: &str = "https://api.adsbdb.com/v0";
-const ADSBLOL_BASE_URL: &str = "https://api.adsb.lol/v2";
-const AIRPLANES_LIVE_BASE_URL: &str = "https://api.airplanes.live/v2";
-const ADSBFI_BASE_URL: &str = "https://opendata.adsb.fi/api/v2";
-const ADSBONE_BASE_URL: &str = "https://api.adsb.one/v2";
-const NOMINATIM_BASE_URL: &str = "https://nominatim.openstreetmap.org";
-const AIRLINE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
-const ADSB_AGGREGATOR_TIMEOUT: Duration = Duration::from_secs(2);
+use super::AviationClient;
 
 /// Freshness equivalence window, in seconds. Position fixes whose `seen_pos`
 /// falls in the same bucket are treated as equally fresh, so `rssi` decides.
 const FRESH_WINDOW: f64 = 5.0;
 
-/// Cooldown duration a backend is parked for after a 429 or error streak.
-const ADSB_COOLDOWN: Duration = Duration::from_secs(60);
 /// Consecutive non-timeout retryable errors that trigger a cooldown park.
 const ERROR_STREAK_PARK: u8 = 3;
 /// Minimum spacing for aggregate ADS-B outage error logs.
 const ADSB_AGGREGATE_OUTAGE_LOG_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Per-backend health, index-aligned with `AviationClient::adsb_aggregators`.
-struct BackendHealth {
+pub(super) struct BackendHealth {
     /// Backend is available when `parked_until <= now`.
-    parked_until: Instant,
+    pub(super) parked_until: Instant,
     /// Consecutive non-timeout retryable errors.
-    error_streak: u8,
+    pub(super) error_streak: u8,
 }
 
 /// Quantize `seen_pos` into a freshness bucket (lower = fresher). Missing,
@@ -120,14 +90,14 @@ fn merge_aircraft(per_backend: Vec<Vec<NearbyAircraft>>) -> Vec<NearbyAircraft> 
 }
 
 #[derive(Clone)]
-pub(super) struct AdsbAggregator {
+pub(in crate::aviation) struct AdsbAggregator {
     name: &'static str,
     base_url: String,
     path_style: AdsbPathStyle,
 }
 
 impl AdsbAggregator {
-    pub(super) fn readsb_v2(name: &'static str, base_url: String) -> Self {
+    pub(in crate::aviation) fn readsb_v2(name: &'static str, base_url: String) -> Self {
         Self {
             name,
             base_url,
@@ -135,7 +105,7 @@ impl AdsbAggregator {
         }
     }
 
-    pub(super) fn adsb_fi(base_url: String) -> Self {
+    pub(in crate::aviation) fn adsb_fi(base_url: String) -> Self {
         Self {
             name: "adsb.fi",
             base_url,
@@ -151,7 +121,7 @@ enum AdsbPathStyle {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum AdsbEndpoint<'a> {
+enum AdsbEndpoint<'a> {
     Point { lat: f64, lon: f64, radius_nm: u16 },
     Hex(&'a str),
     Callsign(&'a str),
@@ -166,7 +136,7 @@ impl AdsbEndpoint<'_> {
         }
     }
 
-    pub(super) fn url(&self, aggregator: &AdsbAggregator) -> String {
+    fn url(&self, aggregator: &AdsbAggregator) -> String {
         let base = aggregator.base_url.trim_end_matches('/');
         match (aggregator.path_style, self) {
             (
@@ -213,111 +183,7 @@ enum AdsbFetchError {
     Fatal(eyre::Report),
 }
 
-#[derive(Debug, Deserialize)]
-struct NominatimResult {
-    lat: String,
-    lon: String,
-    display_name: String,
-}
-
-#[derive(Clone)]
-pub struct AviationClient {
-    http: reqwest::Client,
-    adsb_aggregators: Vec<AdsbAggregator>,
-    adsb_aggregator_timeout: Duration,
-    adsbdb_base_url: String,
-    nominatim_base_url: String,
-    aviationstack: Option<AviationstackConfig>,
-    adsb_cooldown: Duration,
-    health: Arc<Mutex<Vec<BackendHealth>>>,
-    last_adsb_aggregate_outage_log: Arc<Mutex<Option<Instant>>>,
-}
-
 impl AviationClient {
-    pub fn new() -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(APP_USER_AGENT)
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(15))
-            .build()
-            .wrap_err("Failed to build aviation HTTP client")?;
-        Ok(Self::new_with_adsb_aggregators(
-            Self::default_adsb_aggregators(),
-            ADSBDB_BASE_URL.to_owned(),
-            NOMINATIM_BASE_URL.to_owned(),
-            http,
-        ))
-    }
-
-    pub fn new_with_base_url(
-        adsb_base_url: String,
-        adsbdb_base_url: String,
-        nominatim_base_url: String,
-        http_client: reqwest::Client,
-    ) -> Self {
-        Self::new_with_adsb_aggregators(
-            vec![AdsbAggregator::readsb_v2("adsb.lol", adsb_base_url)],
-            adsbdb_base_url,
-            nominatim_base_url,
-            http_client,
-        )
-    }
-
-    pub(super) fn new_with_adsb_aggregators(
-        adsb_aggregators: Vec<AdsbAggregator>,
-        adsbdb_base_url: String,
-        nominatim_base_url: String,
-        http_client: reqwest::Client,
-    ) -> Self {
-        let now = Instant::now();
-        let health = adsb_aggregators
-            .iter()
-            .map(|_| BackendHealth {
-                parked_until: now,
-                error_streak: 0,
-            })
-            .collect();
-        Self {
-            http: http_client,
-            adsb_aggregators,
-            adsb_aggregator_timeout: ADSB_AGGREGATOR_TIMEOUT,
-            adsbdb_base_url,
-            nominatim_base_url,
-            aviationstack: None,
-            adsb_cooldown: ADSB_COOLDOWN,
-            health: Arc::new(Mutex::new(health)),
-            last_adsb_aggregate_outage_log: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn default_adsb_aggregators() -> Vec<AdsbAggregator> {
-        vec![
-            AdsbAggregator::readsb_v2("adsb.lol", ADSBLOL_BASE_URL.to_owned()),
-            AdsbAggregator::readsb_v2("airplanes.live", AIRPLANES_LIVE_BASE_URL.to_owned()),
-            AdsbAggregator::adsb_fi(ADSBFI_BASE_URL.to_owned()),
-            AdsbAggregator::readsb_v2("ADSB.One", ADSBONE_BASE_URL.to_owned()),
-        ]
-    }
-
-    /// Enable Aviationstack flight-metadata enrichment.
-    ///
-    /// `api_key` comes from the bootstrap secret in config.toml.
-    /// `base_url` and `timeout_secs` come from the dashboard settings store.
-    /// Passing `None` for `api_key` disables Aviationstack enrichment.
-    pub fn with_aviationstack(
-        mut self,
-        api_key: Option<SecretString>,
-        base_url: String,
-        timeout_secs: u64,
-    ) -> Self {
-        self.aviationstack = api_key.map(|key| AviationstackConfig {
-            api_key: key,
-            base_url,
-            timeout_secs,
-        });
-        self
-    }
-
     fn live_backend_indices(&self) -> Vec<usize> {
         let now = Instant::now();
         let health = self.health.lock().expect("health mutex poisoned");
@@ -401,10 +267,6 @@ impl AviationClient {
     fn with_adsb_cooldown(mut self, cooldown: Duration) -> Self {
         self.adsb_cooldown = cooldown;
         self
-    }
-
-    pub fn aviationstack_enabled(&self) -> bool {
-        self.aviationstack.is_some()
     }
 
     async fn fetch_adsb_merged(&self, endpoint: AdsbEndpoint<'_>) -> Result<AdsbAircraftResponse> {
@@ -569,7 +431,7 @@ impl AviationClient {
         })
     }
 
-    pub(super) async fn get_aircraft_nearby(
+    pub(in crate::aviation) async fn get_aircraft_nearby(
         &self,
         lat: f64,
         lon: f64,
@@ -602,317 +464,6 @@ impl AviationClient {
 
         Ok(resp.aircraft.into_iter().next())
     }
-
-    pub async fn get_flight_route(&self, callsign: &str) -> Result<Option<FlightRoute>> {
-        let url = format!("{}/callsign/{callsign}", self.adsbdb_base_url);
-        debug!(callsign = %callsign, "Fetching flight route from adsbdb");
-
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .wrap_err("Failed to send request to adsbdb")?;
-
-        let status = resp.status();
-        if status.is_client_error() {
-            debug!(
-                provider = "adsbdb",
-                endpoint_kind = "flight_route",
-                status = status.as_u16(),
-                "adsbdb returned client response"
-            );
-            return Ok(None);
-        }
-        if !status.is_success() {
-            return Ok(None);
-        }
-
-        let body: AdsbDbResponse = resp
-            .json()
-            .await
-            .wrap_err("Failed to parse adsbdb response")?;
-
-        Ok(body.response.flightroute)
-    }
-
-    pub async fn get_aviationstack_flight_metadata(
-        &self,
-        identifier: &FlightIdentifier,
-        callsign: Option<&str>,
-    ) -> Result<Option<AviationstackFlightMetadata>> {
-        let Some(config) = &self.aviationstack else {
-            return Ok(None);
-        };
-        let queries = aviationstack_queries(identifier, callsign);
-        if queries.is_empty() {
-            debug!(identifier = %identifier, "Skipping aviationstack lookup: no callsign query");
-            return Ok(None);
-        }
-
-        // Tried in order: a marketing IATA number (e.g. DE1513) may be missing
-        // from aviationstack even when the resolved operating ICAO callsign
-        // (CFG1513) is indexed, so `aviationstack_queries` appends the ICAO form.
-        // A transient error on a non-final query must not block the fallback;
-        // only the last query's error propagates.
-        let last = queries.len() - 1;
-        for (i, (query_key, query_value)) in queries.iter().enumerate() {
-            match self
-                .aviationstack_query_one(config, query_key, query_value)
-                .await
-            {
-                Ok(Some(metadata)) => return Ok(Some(metadata)),
-                Ok(None) => {}
-                Err(_) if i < last => {
-                    warn!(
-                        query_key,
-                        "aviationstack query failed; trying fallback query"
-                    );
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(None)
-    }
-
-    async fn aviationstack_query_one(
-        &self,
-        config: &AviationstackConfig,
-        query_key: &str,
-        query_value: &str,
-    ) -> Result<Option<AviationstackFlightMetadata>> {
-        let url = format!("{}/flights", config.base_url.trim_end_matches('/'));
-        debug!(
-            query_key,
-            query_value = %query_value,
-            "Fetching flight metadata from aviationstack"
-        );
-
-        let timeout = Duration::from_secs(config.timeout_secs);
-        let resp = self
-            .http
-            .get(&url)
-            .query(&[
-                ("access_key", config.api_key.expose_secret()),
-                (query_key, query_value),
-                ("limit", "1"),
-            ])
-            .timeout(timeout)
-            .send()
-            .await
-            .wrap_err("Failed to send request to aviationstack")?;
-
-        let status = resp.status();
-        if status.is_client_error() {
-            let code = status.as_u16();
-            if aviationstack_4xx_is_actionable(code) {
-                warn!(
-                    provider = "aviationstack",
-                    endpoint_kind = "flight_metadata",
-                    status = code,
-                    query_key,
-                    "aviationstack refused request (auth/quota); enrichment degraded"
-                );
-            } else {
-                debug!(
-                    provider = "aviationstack",
-                    endpoint_kind = "flight_metadata",
-                    status = code,
-                    query_key,
-                    "aviationstack returned client response"
-                );
-            }
-            return Ok(None);
-        }
-        if !status.is_success() {
-            return Err(eyre::eyre!("aviationstack returned {status}"));
-        }
-
-        let resp: AviationstackFlightsResponse = resp
-            .json()
-            .await
-            .wrap_err("Failed to parse aviationstack response")?;
-
-        Ok(resp
-            .data
-            .into_iter()
-            .next()
-            .map(AviationstackFlightMetadata::from))
-    }
-
-    /// Resolve a potential IATA flight number to an ICAO callsign.
-    pub async fn resolve_callsign(&self, input: &str) -> String {
-        if !is_iata_flight_number(input) {
-            return input.to_string();
-        }
-
-        let (airline_iata, flight_num) = input.split_at(2);
-
-        // Try static CSV lookup first
-        if let Some(&icao) = airline_table().get(airline_iata) {
-            debug!(iata = %airline_iata, icao = %icao, "Resolved airline code via CSV");
-            return format!("{icao}{flight_num}");
-        }
-
-        // Fallback: query adsbdb airline API
-        debug!(iata = %airline_iata, "Airline not in CSV, trying adsbdb API");
-        match tokio::time::timeout(
-            AIRLINE_LOOKUP_TIMEOUT,
-            self.lookup_airline_icao(airline_iata),
-        )
-        .await
-        {
-            Ok(Ok(Some(icao))) => {
-                warn!(
-                    iata = %airline_iata,
-                    icao = %icao,
-                    "Resolved airline via adsbdb API — consider adding to airlines.csv"
-                );
-                format!("{icao}{flight_num}")
-            }
-            Ok(Ok(None)) => {
-                debug!(iata = %airline_iata, "Airline not found in adsbdb");
-                input.to_string()
-            }
-            Ok(Err(e)) => {
-                warn!(error = ?e, iata = %airline_iata, "adsbdb airline lookup failed");
-                input.to_string()
-            }
-            Err(_) => {
-                warn!(iata = %airline_iata, "adsbdb airline lookup timed out");
-                input.to_string()
-            }
-        }
-    }
-
-    /// Query adsbdb for an airline's ICAO code by IATA code.
-    async fn lookup_airline_icao(&self, iata: &str) -> Result<Option<String>> {
-        let url = format!("{}/airline/{iata}", self.adsbdb_base_url);
-        debug!(url = %url, "Fetching airline from adsbdb");
-
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .wrap_err("Failed to send request to adsbdb")?;
-
-        let status = resp.status();
-        if status.is_client_error() {
-            debug!(
-                provider = "adsbdb",
-                endpoint_kind = "airline",
-                status = status.as_u16(),
-                "adsbdb airline lookup returned client response"
-            );
-            return Ok(None);
-        }
-        if !status.is_success() {
-            return Ok(None);
-        }
-
-        let body: AdsbDbAirlineResponse = resp
-            .json()
-            .await
-            .wrap_err("Failed to parse adsbdb airline response")?;
-
-        Ok(body.response.into_iter().next().map(|a| a.icao))
-    }
-
-    pub(super) async fn geocode_nominatim(&self, query: &str) -> Result<Option<ResolvedLocation>> {
-        let url = format!("{}/search", self.nominatim_base_url);
-        debug!(query = %query, "Geocoding via Nominatim");
-
-        let resp = self
-            .http
-            .get(&url)
-            .query(&[("q", query), ("format", "json"), ("limit", "1")])
-            .send()
-            .await
-            .wrap_err("Failed to send request to Nominatim")?
-            .error_for_status()
-            .wrap_err("Nominatim returned error status")?;
-
-        let results: Vec<NominatimResult> = resp
-            .json()
-            .await
-            .wrap_err("Failed to parse Nominatim response")?;
-
-        let Some(first) = results.into_iter().next() else {
-            debug!(query = %query, "Nominatim returned no results");
-            return Ok(None);
-        };
-
-        let lat: f64 = first.lat.parse().wrap_err("Invalid lat from Nominatim")?;
-        let lon: f64 = first.lon.parse().wrap_err("Invalid lon from Nominatim")?;
-
-        // Trim display_name to first comma-separated segment
-        let display_name = first
-            .display_name
-            .split(',')
-            .next()
-            .unwrap_or(&first.display_name)
-            .trim()
-            .to_string();
-
-        debug!(query = %query, lat = %lat, lon = %lon, display = %display_name, "Nominatim resolved");
-        Ok(Some(ResolvedLocation {
-            lat,
-            lon,
-            display_name,
-        }))
-    }
-}
-
-/// Whether an aviationstack 4xx is operationally actionable (bad key, plan
-/// limit, quota) and so warrants a `warn` rather than a quiet `debug`. Other
-/// 4xx (e.g. 404 no-match) are routine and stay quiet.
-fn aviationstack_4xx_is_actionable(status: u16) -> bool {
-    matches!(status, 401 | 403 | 429)
-}
-
-/// Ordered aviationstack `/flights` queries to try for an identifier.
-///
-/// A marketing IATA number (e.g. DE1513) may be missing from aviationstack even
-/// when the resolved operating ICAO callsign (CFG1513) is indexed, so an IATA
-/// query is followed by the resolved ICAO as a fallback. Empty when there is
-/// nothing to query.
-pub(super) fn aviationstack_queries(
-    identifier: &FlightIdentifier,
-    callsign: Option<&str>,
-) -> Vec<(&'static str, String)> {
-    let candidate = match identifier {
-        FlightIdentifier::Callsign(value) => value.as_str(),
-        FlightIdentifier::Hex(_) => match callsign {
-            Some(callsign) => callsign,
-            None => return Vec::new(),
-        },
-    }
-    .trim();
-
-    if candidate.is_empty() {
-        return Vec::new();
-    }
-
-    let candidate = candidate.to_uppercase();
-    if is_iata_flight_number(&candidate) {
-        let mut queries = vec![("flight_iata", candidate.clone())];
-        if let Some(icao) = callsign.map(str::trim).filter(|c| !c.is_empty()) {
-            let icao = icao.to_uppercase();
-            if is_icao_flight_number(&icao) && icao != candidate {
-                queries.push(("flight_icao", icao));
-            }
-        }
-        queries
-    } else if is_icao_flight_number(&candidate)
-        || !matches!(identifier, FlightIdentifier::Hex(_))
-        || callsign.is_some()
-    {
-        vec![("flight_icao", candidate)]
-    } else {
-        Vec::new()
-    }
 }
 
 #[cfg(test)]
@@ -920,11 +471,6 @@ mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn aviation_client() -> AviationClient {
-        crate::install_crypto_provider();
-        AviationClient::new().unwrap()
-    }
 
     fn test_client_with_aggregators(adsb_aggregators: Vec<AdsbAggregator>) -> AviationClient {
         crate::install_crypto_provider();
@@ -961,103 +507,6 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn resolve_callsign_translates_iata() {
-        let client = aviation_client();
-        assert_eq!(client.resolve_callsign("TP247").await, "TAP247");
-        assert_eq!(client.resolve_callsign("LH5765").await, "DLH5765");
-    }
-
-    #[tokio::test]
-    async fn resolve_callsign_passes_through_icao() {
-        let client = aviation_client();
-        assert_eq!(client.resolve_callsign("TAP247").await, "TAP247");
-        assert_eq!(client.resolve_callsign("DLH5765").await, "DLH5765");
-    }
-
-    #[tokio::test]
-    async fn resolve_callsign_passes_through_hex() {
-        let client = aviation_client();
-        assert_eq!(client.resolve_callsign("4CA87D").await, "4CA87D");
-    }
-
-    #[test]
-    fn aviationstack_query_detects_iata_and_icao_flight_numbers() {
-        assert_eq!(
-            aviationstack_queries(&FlightIdentifier::Callsign("LH1929".to_string()), None),
-            vec![("flight_iata", "LH1929".to_string())]
-        );
-        assert_eq!(
-            aviationstack_queries(&FlightIdentifier::Callsign("DLH1929".to_string()), None),
-            vec![("flight_icao", "DLH1929".to_string())]
-        );
-    }
-
-    #[test]
-    fn aviationstack_query_appends_resolved_icao_fallback() {
-        assert_eq!(
-            aviationstack_queries(
-                &FlightIdentifier::Callsign("DE1513".to_string()),
-                Some("CFG1513")
-            ),
-            vec![
-                ("flight_iata", "DE1513".to_string()),
-                ("flight_icao", "CFG1513".to_string()),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn adsbdb_route_4xx_is_quiet_miss() {
-        crate::install_crypto_provider();
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/callsign/DLH1234"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden secret body"))
-            .mount(&server)
-            .await;
-
-        let client = AviationClient::new_with_adsb_aggregators(
-            Vec::new(),
-            server.uri(),
-            "http://nominatim.test".to_string(),
-            reqwest::Client::new(),
-        );
-
-        let route = client
-            .get_flight_route("DLH1234")
-            .await
-            .expect("4xx is a sanitized provider outcome");
-        assert!(route.is_none());
-    }
-
-    #[tokio::test]
-    async fn aviationstack_4xx_is_quiet_miss_without_body() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/flights"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("no matching flights"))
-            .mount(&server)
-            .await;
-
-        let client = aviation_client().with_aviationstack(
-            Some(SecretString::new("test-key".into())),
-            server.uri(),
-            5,
-        );
-
-        let metadata = client
-            .get_aviationstack_flight_metadata(
-                &FlightIdentifier::Callsign("DLH1234".to_string()),
-                Some("DLH1234"),
-            )
-            .await
-            .expect("4xx is a sanitized provider outcome");
-        assert!(metadata.is_none());
-    }
-
-    // Under parallel fan-out both backends are queried; the 5xx one is
-    // dropped from the merge and the healthy backend's aircraft is returned.
     #[tokio::test]
     async fn adsb_falls_back_from_5xx_to_next_aggregator() {
         let (primary, backup) = tokio::join!(MockServer::start(), MockServer::start());
@@ -1481,18 +930,6 @@ mod tests {
         let _ = client.get_aircraft_by_hex("3c6589").await.unwrap();
         assert_eq!(a.received_requests().await.unwrap().len(), 1, "A parked");
         assert_eq!(b.received_requests().await.unwrap().len(), 2);
-    }
-
-    #[test]
-    fn aviationstack_auth_and_quota_4xx_are_actionable() {
-        // Auth / plan / quota refusals warrant an operator-visible warn.
-        assert!(aviationstack_4xx_is_actionable(401));
-        assert!(aviationstack_4xx_is_actionable(403));
-        assert!(aviationstack_4xx_is_actionable(429));
-        // Routine "no match" / bad-request responses stay quiet.
-        assert!(!aviationstack_4xx_is_actionable(404));
-        assert!(!aviationstack_4xx_is_actionable(400));
-        assert!(!aviationstack_4xx_is_actionable(422));
     }
 
     #[tokio::test]
