@@ -438,7 +438,7 @@ async fn info_reuses_aviationstack_cache_seeded_by_track() {
     bot.send("alice", "!track LH1929").await;
     let ack = bot.expect_say(Duration::from_secs(5)).await;
     assert!(ack.contains("Tracke DLH1929"), "got: {ack}");
-    assert!(ack.contains("LH1929 Lufthansa"), "got: {ack}");
+    assert!(ack.contains("🛫 LH1929 Lufthansa"), "got: {ack}");
     assert!(
         ack.contains("BER T1 Gate B10 -> MUC T2 Gate G28"),
         "got: {ack}"
@@ -448,16 +448,18 @@ async fn info_reuses_aviationstack_cache_seeded_by_track() {
     assert!(ack.contains("Baggage: 17"), "got: {ack}");
     assert!(ack.contains("Aircraft: A320 D-AIDW"), "got: {ack}");
     assert!(ack.contains("ICAO24: 3C6497"), "got: {ack}");
+    assert!(ack.contains("Date: 2026-04-18"), "got: {ack}");
 
     bot.send("bob", "!info DLH1929").await;
     let info = bot.expect_say(Duration::from_secs(5)).await;
-    assert!(info.contains("LH1929 Lufthansa"), "got: {info}");
+    assert!(info.contains("🛫 LH1929 Lufthansa"), "got: {info}");
     assert!(
         info.contains("BER T1 Gate B10 -> MUC T2 Gate G28"),
         "got: {info}"
     );
     assert!(info.contains("Baggage: 17"), "got: {info}");
     assert!(info.contains("Status: scheduled"), "got: {info}");
+    assert!(info.contains("Date: 2026-04-18"), "got: {info}");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     let aviationstack_requests = bot

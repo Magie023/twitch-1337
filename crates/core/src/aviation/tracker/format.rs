@@ -102,7 +102,7 @@ pub(crate) fn msg_aviationstack_info(metadata: &AviationstackFlightMetadata) -> 
         metadata.arrival_gate.as_deref(),
     );
 
-    let mut parts = vec![format!("{flight}{airline}"), format!("{dep} -> {arr}")];
+    let mut parts = vec![format!("🛫 {flight}{airline}"), format!("{dep} -> {arr}")];
 
     if let Some(dep_time) = format_time(
         metadata
@@ -136,6 +136,9 @@ pub(crate) fn msg_aviationstack_info(metadata: &AviationstackFlightMetadata) -> 
     }
     if let Some(status) = present(metadata.flight_status.as_deref()) {
         parts.push(format!("Status: {status}"));
+    }
+    if let Some(flight_date) = present(metadata.flight_date.as_deref()) {
+        parts.push(format!("Date: {flight_date}"));
     }
 
     let mut aircraft = Vec::new();
