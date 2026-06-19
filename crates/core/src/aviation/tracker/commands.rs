@@ -679,6 +679,7 @@ async fn handle_track<T, L>(
         divert_consecutive_polls: 0,
         dest_lat: None,
         dest_lon: None,
+        tracking_lost_reported_at: None,
     };
     seed_flight_aliases(&mut flight);
 

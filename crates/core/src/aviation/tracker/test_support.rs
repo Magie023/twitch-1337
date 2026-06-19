@@ -47,5 +47,6 @@ pub(crate) fn tracked_flight() -> TrackedFlight {
         divert_consecutive_polls: 0,
         dest_lat: None,
         dest_lon: None,
+        tracking_lost_reported_at: None,
     }
 }
