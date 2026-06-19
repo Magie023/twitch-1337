@@ -28,6 +28,7 @@ use crate::error::WebError;
 use crate::flash;
 use crate::routes::{initial_of, render, render_with};
 use crate::state::WebState;
+use crate::user_facing::UserFacing;
 
 /// Viewer-tier surface: GET /pings list. Detail (`/pings/{name}` GET) and
 /// form (`/pings/new` GET) stay on the mod router because they target
@@ -217,7 +218,7 @@ async fn create(
                 name: &name,
                 template_text: &template,
                 csrf: &csrf_hex,
-                error: Some(e.to_string()),
+                error: Some(e.user_message()),
                 user_login: &session.user_login,
                 user_avatar_url: session.avatar_url.as_deref(),
                 current_page: crate::nav::PINGS,
@@ -320,7 +321,7 @@ async fn update(
                 name: &name,
                 template_text: &template,
                 csrf: &csrf_hex,
-                error: Some(e.to_string()),
+                error: Some(e.user_message()),
                 user_login: &session.user_login,
                 user_avatar_url: session.avatar_url.as_deref(),
                 current_page: crate::nav::PINGS,
@@ -382,7 +383,7 @@ async fn add_member(
             .ping_actor
             .add_member(name.clone(), username.clone())
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.user_message())
     };
 
     let view = state

@@ -20,9 +20,7 @@ use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tower_cookies::Cookies;
-use twitch_1337_core::ai::memory::store::{
-    FrontmatterOverride, WriteError, WriteOutcome, validate_state_slug,
-};
+use twitch_1337_core::ai::memory::store::{FrontmatterOverride, WriteOutcome, validate_state_slug};
 use twitch_1337_core::ai::memory::types::{FileKind, MemoryFile};
 
 use crate::auth::csrf;
@@ -31,6 +29,7 @@ use crate::error::{ConflictPayload, WebError};
 use crate::flash;
 use crate::routes::{initial_of, render, render_with};
 use crate::state::WebState;
+use crate::user_facing::write_error_for_form;
 
 pub fn router() -> Router<WebState> {
     Router::new()
@@ -742,12 +741,7 @@ async fn save_kind(
             );
             // Render the editor with the user's draft preserved. `Io` is the
             // only variant that lacks a meaningful form context — bubble it.
-            let msg = match err {
-                WriteError::Full => "exceeds byte cap".to_owned(),
-                WriteError::StateFull => "state collection full".to_owned(),
-                WriteError::InvalidSlug => "reserved or invalid slug".to_owned(),
-                WriteError::Io(e) => return Err(WebError::Internal(e)),
-            };
+            let msg = write_error_for_form(err)?;
             render_with(
                 StatusCode::BAD_REQUEST,
                 &EditorTpl {
@@ -941,12 +935,7 @@ async fn create_state(
                 result = "error",
                 error = ?err,
             );
-            let msg = match err {
-                WriteError::Full => "exceeds byte cap".to_owned(),
-                WriteError::StateFull => "state collection full".to_owned(),
-                WriteError::InvalidSlug => "reserved or invalid slug".to_owned(),
-                WriteError::Io(e) => return Err(WebError::Internal(e)),
-            };
+            let msg = write_error_for_form(err)?;
             render_state_create(
                 StatusCode::BAD_REQUEST,
                 &form.body,
