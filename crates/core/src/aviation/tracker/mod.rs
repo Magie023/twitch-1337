@@ -211,6 +211,8 @@ pub struct TrackedFlight {
     pub dest_lat: Option<f64>,
     #[serde(default)]
     pub dest_lon: Option<f64>,
+    #[serde(default)]
+    pub tracking_lost_reported_at: Option<DateTime<Utc>>,
 }
 
 /// Persisted AviationStack lookup result shared by `!track` and `!info`.
@@ -250,8 +252,12 @@ pub struct FlightTrackerState {
 pub struct TrackedFlightView {
     pub identifier: String,
     pub callsign: Option<String>,
+    pub hex: Option<String>,
     pub owner_login: String,
     pub phase: String,
+    pub route: Option<String>,
+    pub target_confirmation: String,
+    pub hex_source: Option<String>,
     pub altitude_ft: Option<i64>,
     pub ground_speed_kts: Option<f64>,
     pub last_seen_secs_ago: Option<u64>,
@@ -269,12 +275,19 @@ pub fn build_flight_view(state: &FlightTrackerState, now: DateTime<Utc>) -> Vec<
                 .or_else(|| f.hex.clone())
                 .unwrap_or_else(|| format!("{}", f.identifier)),
             callsign: f.callsign.clone(),
+            hex: f.hex.clone(),
             owner_login: f.tracked_by.clone(),
             phase: if f.target_confirmation == TargetConfirmation::AircraftVisible {
                 "AircraftVisible".to_string()
             } else {
                 format!("{}", f.phase)
             },
+            route: f
+                .route
+                .as_ref()
+                .map(|(origin, dest)| format!("{origin} → {dest}")),
+            target_confirmation: format!("{:?}", f.target_confirmation),
+            hex_source: f.hex_source.map(|source| format!("{:?}", source)),
             altitude_ft: f.altitude_ft,
             ground_speed_kts: f.ground_speed_kts,
             last_seen_secs_ago: f
@@ -310,6 +323,8 @@ pub enum TrackerCommand {
     },
     DeleteFromWeb {
         identifier: String,
+        requested_by: String,
+        is_mod: bool,
         reply: tokio::sync::oneshot::Sender<Option<String>>,
     },
 }
@@ -363,6 +378,7 @@ mod tests {
             divert_consecutive_polls: 0,
             dest_lat: None,
             dest_lon: None,
+            tracking_lost_reported_at: None,
         }
     }
 

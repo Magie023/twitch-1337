@@ -39,7 +39,12 @@ where
         let identifier = match FlightIdentifier::parse(&input) {
             Ok(id) => id,
             Err(e) => {
-                ctx.sender.reply(ctx.privmsg, format!("{e} FDM")).await;
+                ctx.sender
+                    .reply(
+                        ctx.privmsg,
+                        format!("Ungültiger Identifier: {e} | Grund: callsign/hex prüfen FDM"),
+                    )
+                    .await;
                 return Ok(());
             }
         };

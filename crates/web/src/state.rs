@@ -68,7 +68,9 @@ pub struct WebState {
     pub leaderboard: Arc<RwLock<HashMap<String, PersonalBest>>>,
     /// Sender half of the flight-tracker command channel. `None` when
     /// aviation is disabled at startup; the `/flights` handler then renders
-    /// the disabled placeholder instead of awaiting a snapshot.
+    /// the disabled placeholder instead of awaiting a snapshot. Snapshot
+    /// requests are bounded by the route timeout so the dashboard can show
+    /// a degraded state instead of blocking when the tracker is busy.
     pub tracker_tx: Option<Arc<tokio::sync::mpsc::Sender<TrackerCommand>>>,
     /// TTL cache for Twitch helix `profile_image_url` lookups. Shared
     /// across handlers so repeat `/memory/users` loads don't re-issue

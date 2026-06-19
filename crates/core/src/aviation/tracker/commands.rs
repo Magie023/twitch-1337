@@ -32,6 +32,13 @@ use super::advance::{
     identifier_callsign, last_seen_age_secs, target_confirmation_for_aircraft,
 };
 
+fn flight_state_changed(before: &TrackedFlight, after: &TrackedFlight) -> bool {
+    match (serde_json::to_value(before), serde_json::to_value(after)) {
+        (Ok(before), Ok(after)) => before != after,
+        _ => true,
+    }
+}
+
 fn find_index_by_identifier(
     flights: &[TrackedFlight],
     identifier: &FlightIdentifier,
@@ -427,8 +434,22 @@ async fn process_latency_sensitive_command(
             let _ = reply.send(build_flight_view(state, now));
             None
         }
-        TrackerCommand::DeleteFromWeb { identifier, reply } => {
-            let removed = remove_flight_at(state, &identifier, data_dir, "web", clock).await;
+        TrackerCommand::DeleteFromWeb {
+            identifier,
+            requested_by,
+            is_mod,
+            reply,
+        } => {
+            let removed = remove_flight_for_request(
+                state,
+                &identifier,
+                &requested_by,
+                is_mod,
+                data_dir,
+                clock,
+            )
+            .await
+            .map(|outcome| outcome.label);
             let _ = reply.send(removed);
             None
         }
@@ -546,7 +567,7 @@ async fn handle_track<T, L>(
         sender
             .reply(
                 reply_to,
-                format!("Maximal {MAX_TRACKED_FLIGHTS} Flüge gleichzeitig FDM"),
+                format!("Track-Limit erreicht: maximal {MAX_TRACKED_FLIGHTS} aktive Flüge gleichzeitig FDM"),
             )
             .await;
         return;
@@ -561,7 +582,9 @@ async fn handle_track<T, L>(
         sender
             .reply(
                 reply_to,
-                format!("Du trackst schon {MAX_FLIGHTS_PER_USER} Flüge FDM"),
+                format!(
+                    "Track-Limit erreicht: du trackst bereits {MAX_FLIGHTS_PER_USER} Flüge FDM"
+                ),
             )
             .await;
         return;
@@ -569,7 +592,10 @@ async fn handle_track<T, L>(
 
     if duplicate_tracking_exists(state, &identifier, None, None) {
         sender
-            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} wird bereits getrackt | Status: aktiv FDM"),
+            )
             .await;
         return;
     }
@@ -584,7 +610,10 @@ async fn handle_track<T, L>(
         && duplicate_tracking_exists(state, &identifier, Some(resolved), None)
     {
         sender
-            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} wird bereits getrackt | Status: aktiv FDM"),
+            )
             .await;
         return;
     }
@@ -671,6 +700,7 @@ async fn handle_track<T, L>(
         divert_consecutive_polls: 0,
         dest_lat: None,
         dest_lon: None,
+        tracking_lost_reported_at: None,
     };
     seed_flight_aliases(&mut flight);
 
@@ -687,7 +717,10 @@ async fn handle_track<T, L>(
             save_tracker_state(data_dir, state).await;
         }
         sender
-            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} wird bereits getrackt | Status: aktiv FDM"),
+            )
             .await;
         return;
     }
@@ -746,7 +779,7 @@ async fn handle_track<T, L>(
                             sender
                                 .reply(
                                     reply_to,
-                                    format!("{identifier} nicht gefunden im ADS-B FDM"),
+                                    format!("{identifier} nicht gefunden | Provider: ADS-B | Grund: kein passendes Signal FDM"),
                                 )
                                 .await;
                             return;
@@ -825,7 +858,7 @@ async fn handle_track<T, L>(
                         sender
                             .reply(
                                 reply_to,
-                                format!("{identifier} nicht gefunden im ADS-B FDM"),
+                                format!("{identifier} nicht gefunden | Provider: ADS-B | Grund: kein passendes Signal FDM"),
                             )
                             .await;
                         return;
@@ -835,14 +868,17 @@ async fn handle_track<T, L>(
                     error!(error = ?e, identifier = %identifier, "ADS-B lookup failed");
                     if !keep_pending_on_adsb_absence {
                         sender
-                            .reply(reply_to, "ADS-B Anfrage fehlgeschlagen FDM")
+                            .reply(
+                                reply_to,
+                                "Provider-Problem: ADS-B down | Grund: Anfrage fehlgeschlagen FDM",
+                            )
                             .await;
                         return;
                     }
                 }
                 Err(_) => {
                     if !keep_pending_on_adsb_absence {
-                        sender.reply(reply_to, "ADS-B Anfrage Timeout FDM").await;
+                        sender.reply(reply_to, "Provider-Problem: Timeout | Provider: ADS-B | Grund: Anfrage dauerte zu lange FDM").await;
                         return;
                     }
                     warn!(
@@ -895,7 +931,10 @@ async fn handle_track<T, L>(
         flight.hex.as_deref(),
     ) {
         sender
-            .reply(reply_to, format!("{identifier} wird schon getrackt FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} wird bereits getrackt | Status: aktiv FDM"),
+            )
             .await;
         return;
     }
@@ -994,10 +1033,30 @@ async fn handle_track<T, L>(
     sender.reply(reply_to, response).await;
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "command handler threads shared tracker deps + injected clock"
-)]
+pub(crate) struct UntrackOutcome {
+    pub(crate) label: String,
+}
+
+pub(crate) async fn remove_flight_for_request(
+    state: &mut FlightTrackerState,
+    identifier: &str,
+    requested_by: &str,
+    is_mod: bool,
+    data_dir: &Path,
+    clock: &dyn Clock,
+) -> Option<UntrackOutcome> {
+    let idx = find_flight_index(&state.flights, identifier)?;
+    let flight = &state.flights[idx];
+    if flight.tracked_by != requested_by && !is_mod {
+        return None;
+    }
+
+    let label = remove_flight_at(state, identifier, data_dir, requested_by, clock)
+        .await
+        .unwrap_or_else(|| identifier.to_owned());
+    Some(UntrackOutcome { label })
+}
+
 async fn handle_untrack<T, L>(
     identifier: &str,
     requested_by: &str,
@@ -1013,7 +1072,10 @@ async fn handle_untrack<T, L>(
 {
     let Some(idx) = find_flight_index(&state.flights, identifier) else {
         sender
-            .reply(reply_to, format!("{identifier} nicht gefunden FDM"))
+            .reply(
+                reply_to,
+                format!("{identifier} nicht gefunden | Status: kein aktiver Track FDM"),
+            )
             .await;
         return;
     };
@@ -1023,18 +1085,22 @@ async fn handle_untrack<T, L>(
         sender
             .reply(
                 reply_to,
-                "Nur der Tracker oder Mods können das untracking machen FDM",
+                "Keine Berechtigung: nur Tracker oder Mods können diesen Flug entfernen FDM",
             )
             .await;
         return;
     }
 
-    let name = remove_flight_at(state, identifier, data_dir, requested_by, clock)
+    let name = remove_flight_for_request(state, identifier, requested_by, is_mod, data_dir, clock)
         .await
+        .map(|outcome| outcome.label)
         .unwrap_or_else(|| identifier.to_owned());
 
     sender
-        .reply(reply_to, format!("{name} wird nicht mehr getrackt Okayge"))
+        .reply(
+            reply_to,
+            format!("Untrack entfernt: {name} | Status: nicht mehr getrackt Okayge"),
+        )
         .await;
 }
 
@@ -1076,11 +1142,11 @@ async fn handle_info<T, L>(
     let response = if let Some(metadata) = lookup.metadata {
         msg_aviationstack_info(&metadata)
     } else if lookup.failed {
-        "AviationStack Anfrage fehlgeschlagen FDM".to_string()
+        "Provider-Problem: AviationStack down | Grund: Anfrage fehlgeschlagen FDM".to_string()
     } else if lookup.checked || aviation_client.aviationstack_enabled() {
-        format!("{identifier} nicht bei AviationStack gefunden FDM")
+        format!("{identifier} nicht bei AviationStack gefunden | Grund: keine Provider-Daten FDM")
     } else {
-        "AviationStack nicht konfiguriert FDM".to_string()
+        "Provider-Problem: AviationStack down | Grund: nicht konfiguriert FDM".to_string()
     };
 
     sender.reply(reply_to, response).await;
@@ -1100,7 +1166,7 @@ async fn handle_status<T, L>(
         None => msg_flights_list(&state.flights),
         Some(id) => match find_flight_index(&state.flights, id) {
             Some(idx) => msg_flight_status(&state.flights[idx], clock.now_utc()),
-            None => format!("{id} nicht gefunden FDM"),
+            None => format!("{id} nicht gefunden | Status: kein aktiver Track FDM"),
         },
     };
 
@@ -1121,7 +1187,6 @@ where
     L: LoginCredentials,
 {
     let now = clock.now_utc();
-    let mut changed = false;
     let mut removals: Vec<FlightIdentifier> = Vec::new();
     let mut messages: Vec<String> = Vec::new();
     let mut deferred_commands = Vec::new();
@@ -1133,7 +1198,22 @@ where
     let mut join_set = tokio::task::JoinSet::new();
     let mut fetch_results: Vec<PollAttempt> = Vec::new();
 
-    for flight in state.flights.iter() {
+    let flight_poll_inputs: Vec<TrackedFlight> = state.flights.clone();
+    for flight in flight_poll_inputs.iter() {
+        drain_latency_sensitive_commands(
+            &mut cmd_rx,
+            state,
+            data_dir,
+            clock,
+            &mut deferred_commands,
+        )
+        .await;
+
+        let Some(current_idx) = find_index_by_identifier(&state.flights, &flight.identifier) else {
+            continue;
+        };
+        let flight = &state.flights[current_idx];
+
         match poll_readiness(flight, now) {
             PollReadiness::Due => {}
             PollReadiness::NotDue(_) => continue,
@@ -1150,7 +1230,6 @@ where
                 .await;
                 messages.push(format_emit(flight, &Emit::PendingExpired, now));
                 removals.push(flight.identifier.clone());
-                changed = true;
                 continue;
             }
         }
@@ -1179,6 +1258,15 @@ where
             };
             result
         });
+
+        drain_latency_sensitive_commands(
+            &mut cmd_rx,
+            state,
+            data_dir,
+            clock,
+            &mut deferred_commands,
+        )
+        .await;
     }
 
     if let Some(cmd_rx) = cmd_rx.as_mut() {
@@ -1186,8 +1274,14 @@ where
         while !join_set.is_empty() {
             tokio::select! {
                 res = join_set.join_next() => {
-                    if let Some(Ok((identifier, used_hex, poll_result))) = res {
-                        fetch_results.push((identifier, used_hex, poll_result));
+                    match res {
+                        Some(Ok((identifier, used_hex, poll_result))) => {
+                            fetch_results.push((identifier, used_hex, poll_result));
+                        }
+                        Some(Err(e)) => {
+                            warn!(error = ?e, "ADS-B poll task failed");
+                        }
+                        None => {}
                     }
                 }
                 cmd = cmd_rx.recv(), if command_channel_open => {
@@ -1213,8 +1307,13 @@ where
         }
     } else {
         while let Some(res) = join_set.join_next().await {
-            if let Ok((identifier, used_hex, poll_result)) = res {
-                fetch_results.push((identifier, used_hex, poll_result));
+            match res {
+                Ok((identifier, used_hex, poll_result)) => {
+                    fetch_results.push((identifier, used_hex, poll_result));
+                }
+                Err(e) => {
+                    warn!(error = ?e, "ADS-B poll task failed");
+                }
             }
         }
     }
@@ -1247,11 +1346,14 @@ where
         };
         let obs = Observation { used_hex, outcome };
 
+        let before = state.flights[idx].clone();
         let update = {
             let flight = &mut state.flights[idx];
             advance_flight(flight, &obs, now)
         };
-        changed = true;
+        if flight_state_changed(&before, &state.flights[idx]) {
+            save_tracker_state(data_dir, state).await;
+        }
 
         for event in update.debug {
             append_debug_event(data_dir, now, event).await;
@@ -1268,8 +1370,12 @@ where
                 Ok(Ok(Some(route))) => {
                     let origin = route.origin.iata_code.clone();
                     let dest = route.destination.iata_code.clone();
+                    let route_before = state.flights[idx].clone();
                     let flight = &mut state.flights[idx];
                     apply_route(flight, &origin, &dest);
+                    if flight_state_changed(&route_before, &state.flights[idx]) {
+                        save_tracker_state(data_dir, state).await;
+                    }
                     append_debug_event(
                         data_dir,
                         now,
@@ -1351,7 +1457,7 @@ where
     for identifier in removals {
         if let Some(idx) = find_index_by_identifier(&state.flights, &identifier) {
             state.flights.remove(idx);
-            changed = true;
+            save_tracker_state(data_dir, state).await;
         }
     }
 
@@ -1362,9 +1468,8 @@ where
         sender.say(channel.to_string(), msg).await;
     }
 
-    if changed {
-        save_tracker_state(data_dir, state).await;
-    }
+    // State changes are persisted immediately when they happen so dashboard
+    // commands and shutdowns during long poll cycles do not lose progress.
 
     deferred_commands
 }
